@@ -183,14 +183,27 @@ def _status_code(e: Exception) -> int | None:
 _UNSUPPORTED = ("json mode", "mime", "schema", "response_", "controlled generation", "not enabled for", "not supported for this model")
 
 
+def is_key_problem(e: Exception) -> bool:
+    text = str(e).lower()
+    return _status_code(e) in (401, 403) or (_status_code(e) == 400 and ("api key" in text or "api_key" in text))
+
+
 def unsupported_mode(e: Exception) -> bool:
     """A 400 that is about the structured-output feature itself (not about the image, the key or a quota)."""
     return _status_code(e) == 400 and any(w in str(e).lower() for w in _UNSUPPORTED)
 
 
+def soft_400(e: Exception) -> bool:
+    """Any other 400 that is not about the key. In a structured mode it is worth trying a simpler mode for this one request, because hosted models differ in
+    which options they accept and the error text is not always recognisable."""
+    return _status_code(e) == 400 and not is_key_problem(e)
+
+
 def transient(e: Exception) -> bool:
     c = _status_code(e)
-    return c is None or c == 429 or c >= 500
+    if c is None:                                           # no HTTP status: only network-type failures are worth a retry, not programming errors
+        return isinstance(e, (OSError, TimeoutError)) or any(w in type(e).__name__.lower() for w in ("timeout", "connect", "network", "protocol"))
+    return c == 429 or c >= 500
 
 
 def redact(msg: str, key: str | None) -> str:
@@ -198,16 +211,30 @@ def redact(msg: str, key: str | None) -> str:
     return msg.replace(k, "***") if k else msg
 
 
-def friendly(e: Exception, model: str) -> str:
-    """What the person should be told. Never contains the key or raw provider text."""
-    code, text = _status_code(e), str(e).lower()
-    if code in (401, 403) or (code == 400 and ("api key" in text or "api_key" in text)):
+def provider_reason(e: Exception, key: str | None = None) -> str:
+    """Google's own one-sentence explanation (the `message` of its error), cleaned: key removed, control characters dropped, shortened."""
+    msg = getattr(e, "message", None)
+    if not isinstance(msg, str) or not msg.strip():
+        text = str(e)
+        m = re.search(r"'message':\s*'([^']{3,400})'", text) or re.search(r'"message":\s*"([^"]{3,400})"', text)
+        msg = m.group(1) if m else ""
+    return _clean_text(redact(msg, key), 220)
+
+
+def friendly(e: Exception, model: str, key: str | None = None) -> str:
+    """What the person should be told: a plain-language cause where it is known, otherwise Google's own explanation. Never contains the key."""
+    code = _status_code(e)
+    if is_key_problem(e):
         return "Google rejected the API key (or this key cannot use that model). Check the key and model in Settings."
     if code == 404:
         return f"Google does not know the model “{model}” for this key. Pick another Gemma 4 model in Settings."
     if code == 429:
         return "Google says this key is out of quota or is being rate-limited. Wait a bit and try again."
-    return "Gemma 4 request failed. Check the API key, model name and internet connection, and the server log for details."
+    if isinstance(e, ImportError):
+        return "The google-genai package is not installed on the server. Run: python -m pip install -r requirements.txt"
+    why = provider_reason(e, key)
+    where = f"HTTP {code}" if code else type(e).__name__
+    return f"Gemma 4 request failed ({where}{': ' + why if why else ''}). The server log has the full details."
 
 
 def _call(contents: list, mode_: str, schema: type[BaseModel], key: str | None = None, model: str | None = None) -> str:
@@ -227,28 +254,33 @@ def _call(contents: list, mode_: str, schema: type[BaseModel], key: str | None =
 
 
 async def _generate(contents: list, schema: type[BaseModel], key: str | None = None, model: str | None = None) -> str:
-    """Run a request at the strictest supported mode, stepping down when the API says a mode is not supported, and retrying once on a transient failure."""
+    """Run a request at the strictest mode that works. If the API rejects a mode (explicitly, or with some other 400), try the next simpler one for this request;
+    what finally works is remembered. A temporary failure is retried once. A mode that only failed because of something unrelated (a bad key, say) is never remembered."""
     global _mode
-    retried, last = False, None
-    for _ in range(len(MODES) + 2):
+    i, retried, last = MODES.index(_mode), False, None
+    while i < len(MODES):
+        mode_ = MODES[i]
         try:
-            return await asyncio.to_thread(_call, contents, _mode, schema, key, model)
+            text = await asyncio.to_thread(_call, contents, mode_, schema, key, model)
+            if mode_ != _mode:
+                print(f"Gemma 4 works in {mode_} mode here; using it from now on.")
+                _mode = mode_
+            return text
         except AIError:
             raise
-        except Exception as e:                              # provider errors can contain request details: log them, never send them to the browser
+        except Exception as e:                              # provider errors can contain request details: log them (key removed), never send them raw to the browser
             last = e
-            print(f"Gemma request failed in {_mode} mode ({type(e).__name__}): {redact(str(e), key)}")
-            i = MODES.index(_mode)
-            if unsupported_mode(e) and i < len(MODES) - 1:
-                _mode = MODES[i + 1]
-                print(f"Stepping down to {_mode} mode for the rest of this run.")
+            print(f"Gemma request failed in {mode_} mode ({type(e).__name__}): {redact(str(e), key)}")
+            if (unsupported_mode(e) or soft_400(e)) and i < len(MODES) - 1:
+                i += 1
+                print(f"Trying {MODES[i]} mode for this request.")
                 continue
             if transient(e) and not retried:
                 retried = True
                 await asyncio.sleep(1.0)
                 continue
             break
-    raise AIError(friendly(last, model_name(model))) from last
+    raise AIError(friendly(last, model_name(model), key)) from last
 
 
 async def analyse(jpeg: bytes, hint: str | None = None, key: str | None = None, model: str | None = None) -> list[dict[str, Any]] | None:
@@ -277,5 +309,5 @@ async def check(key: str | None = None, model: str | None = None) -> dict[str, A
         last = e
         print(f"Gemma key check failed ({type(e).__name__}): {redact(str(e), key)}")
     if last is not None:
-        raise AIError(friendly(last, model_name(model))) from last
+        raise AIError(friendly(last, model_name(model), key)) from last
     return {"ok": True, "model": model_name(model), "reply": _clean_text(text, 40)}

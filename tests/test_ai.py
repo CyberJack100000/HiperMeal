@@ -196,3 +196,50 @@ def test_estimates_have_their_own_rate_limit(client, monkeypatch):
     codes = [client.post("/api/nutrition/estimate", json={"food_name": "x"}, headers={"X-Gemini-Key": KEY}).status_code for _ in range(32)]
     assert codes[:30] == [200] * 30 and codes[30:] == [429, 429]
     assert upload(client, png()).status_code == 200                                    # photo analysis is a separate allowance
+
+
+# ------------------------------------------------------------------------------------------------ unrecognised errors must be explained, not hidden
+class ReasonError(Exception):
+    """Shaped like google-genai's APIError: .code and .message."""
+    def __init__(self, code, message):
+        super().__init__(f"{code} INVALID_ARGUMENT. {{'error': {{'code': {code}, 'message': '{message}'}}}}")
+        self.code, self.message = code, message
+
+
+def test_an_unrecognised_400_tries_simpler_modes_and_remembers_only_what_worked(monkeypatch):
+    seen = run_with(monkeypatch, [ReasonError(400, "Request contains an invalid argument."), ReasonError(400, "Request contains an invalid argument."), GOOD])
+    assert asyncio.run(ai._generate(["x"], ai.MealResult, KEY, None)) == GOOD
+    assert [m for m, *_ in seen] == ["schema", "json", "plain"] and ai.mode() == "plain"
+
+
+def test_when_every_mode_fails_the_reason_is_shown_and_the_mode_is_not_changed(monkeypatch):
+    seen = run_with(monkeypatch, [ReasonError(400, "User location is not supported for the API use.")] * 3)
+    with pytest.raises(ai.AIError) as e:
+        asyncio.run(ai._generate(["x"], ai.MealResult, KEY, None))
+    assert [m for m, *_ in seen] == ["schema", "json", "plain"] and ai.mode() == "schema"        # unrelated failures must not downgrade future requests
+    msg = str(e.value)
+    assert "HTTP 400" in msg and "User location is not supported" in msg and "server log" in msg
+
+
+def test_the_reason_is_cleaned_before_it_reaches_the_browser(monkeypatch):
+    run_with(monkeypatch, [ReasonError(500, f"boom {KEY} \x00\x07 " + "x" * 600)] * 2)
+    with pytest.raises(ai.AIError) as e:
+        asyncio.run(ai._generate(["x"], ai.MealResult, KEY, None))
+    msg = str(e.value)
+    assert KEY not in msg and "***" in msg and "\x00" not in msg and len(msg) < 400 and "HTTP 500" in msg
+    class Bare(Exception):
+        code = 502
+    assert "HTTP 502" in ai.friendly(Bare("plain"), "m") and ai.provider_reason(Bare("x 'message': 'Backend said no' y")) == "Backend said no"
+
+
+def test_a_missing_package_and_other_programming_errors_are_not_retried(monkeypatch):
+    seen = run_with(monkeypatch, [ImportError("No module named 'google'")])
+    with pytest.raises(ai.AIError, match="pip install -r requirements.txt"):
+        asyncio.run(ai._generate(["x"], ai.MealResult, KEY, None))
+    assert len(seen) == 1
+    seen = run_with(monkeypatch, [TypeError("odd")])
+    with pytest.raises(ai.AIError, match="TypeError"):
+        asyncio.run(ai._generate(["x"], ai.MealResult, KEY, None))
+    assert len(seen) == 1                                                       # a bug is not a network blip
+    seen = run_with(monkeypatch, [ConnectionError("down"), GOOD])
+    assert asyncio.run(ai._generate(["x"], ai.MealResult, KEY, None)) == GOOD and len(seen) == 2          # but a dropped connection is
