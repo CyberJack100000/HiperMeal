@@ -1,0 +1,343 @@
+/* HiperMeal front end. Plain JavaScript, no build step. Everything shown from the server or the AI is set with textContent, never as HTML. */
+'use strict';
+
+const $ = (s, r = document) => r.querySelector(s);
+const NS = 'http://www.w3.org/2000/svg';
+const KEYS = ['kcal', 'protein_g', 'carbs_g', 'fat_g'];
+
+function h(tag, props, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (v === false || v == null) continue;
+    if (k === 'class') el.className = v;
+    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else if (k === 'value') el.value = v;
+    else if (k === 'checked' || k === 'disabled' || k === 'hidden') el[k] = !!v;
+    else el.setAttribute(k, v === true ? '' : v);
+  }
+  for (const kid of kids.flat()) if (kid !== false && kid != null) el.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+  return el;
+}
+function svg(tag, attrs, ...kids) {
+  const el = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) el.setAttribute(k, v);
+  for (const kid of kids.flat()) if (kid != null) el.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+  return el;
+}
+
+async function api(path, options = {}) {
+  let res;
+  try { res = await fetch('/api' + path, options); } catch { throw new Error('Cannot reach the HiperMeal server. Is it still running?'); }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const d = data.detail;
+    throw new Error(typeof d === 'string' ? d : Array.isArray(d) ? d.map((x) => x.msg).join(' ') : 'Request failed (' + res.status + ')');
+  }
+  return data;
+}
+const post = (path, body) => api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+
+let toastTimer;
+function notify(msg) {
+  const t = $('#toast'); t.textContent = msg; t.classList.remove('hidden');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.add('hidden'), 3800);
+}
+
+// ---------------------------------------------------------------------------------------------------- helpers
+const pad = (n) => String(n).padStart(2, '0');
+const localDate = (d = new Date()) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;   // the person's own day, not UTC
+const parseDay = (s) => { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); };
+const fmtDay = (s) => {
+  const d = parseDay(s), t = localDate(), y = localDate(new Date(Date.now() - 86400000));
+  return s === t ? 'Today' : s === y ? 'Yesterday' : d.toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'short' });
+};
+const r0 = (n) => Math.round(n || 0);
+const macroLine = (t) => `${r0(t.kcal)} kcal · P ${r0(t.protein_g)} g · C ${r0(t.carbs_g)} g · F ${r0(t.fat_g)} g`;
+const num = (v) => (v === '' || v == null ? NaN : Number(v));
+
+const Theme = {
+  get() { try { return localStorage.getItem('hm_theme'); } catch { return null; } },
+  current() { return document.documentElement.dataset.theme || 'light'; },
+  set(t) {
+    try { t ? localStorage.setItem('hm_theme', t) : localStorage.removeItem('hm_theme'); } catch { /* storage blocked */ }
+    if (t) document.documentElement.dataset.theme = t;
+    else document.documentElement.dataset.theme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    this.paint();
+  },
+  paint() { const b = $('#themeBtn'); const dark = this.current() === 'dark'; b.textContent = dark ? '☀ Light' : '☾ Dark'; b.setAttribute('aria-label', dark ? 'Switch to light mode' : 'Switch to dark mode'); },
+};
+
+// ---------------------------------------------------------------------------------------------------- state
+const S = {
+  meals: [], summary: null, targets: null, foodNames: [], health: null,
+  draft: null,            // the photo being reviewed: {file, url, analysisId, aiEnabled, message, mealType, note, foods: [...]}
+};
+
+async function refreshData() {
+  const [m, s] = await Promise.all([api('/meals?days=30&today=' + localDate()), api('/summary?days=7&today=' + localDate())]);
+  S.meals = m.meals; S.summary = s; S.targets = s.targets;
+}
+
+// ---------------------------------------------------------------------------------------------------- draft helpers
+/** The per-100-g values that will be used for a food: the table match, or the person's own numbers. null = not usable yet. */
+function per100(f) {
+  if (f.nutrition) return f.nutrition;
+  const c = Object.fromEntries(KEYS.map((k) => [k, num(f.custom[k])]));
+  if (KEYS.some((k) => !Number.isFinite(c[k]) || c[k] < 0)) return null;
+  if (c.kcal > 900 || c.protein_g > 100 || c.carbs_g > 100 || c.fat_g > 100 || c.protein_g + c.carbs_g + c.fat_g > 100.5) return null;
+  return c;
+}
+function draftTotals() {
+  const t = { kcal: 0, protein_g: 0, carbs_g: 0, fat_g: 0 }; let missing = 0;
+  for (const f of S.draft.foods) {
+    const n = per100(f), g = num(f.grams);
+    if (!n || !(g > 0)) { missing++; continue; }
+    for (const k of KEYS) t[k] += n[k] * g / 100;
+  }
+  return { t, missing };
+}
+function newFood(f) {
+  return { name: f.name, grams: f.grams ?? 100, confidence: f.confidence || '', nutrition: f.nutrition || null, matched_name: f.matched_name || null, match: f.match || null,
+           custom: { kcal: '', protein_g: '', carbs_g: '', fat_g: '' } };
+}
+async function lookup(food) {
+  try {
+    const d = await post('/nutrition/lookup', { food_name: food.name });
+    Object.assign(food, { nutrition: d.nutrition, matched_name: d.matched_name, match: d.match });
+  } catch { Object.assign(food, { nutrition: null, matched_name: null, match: null }); }
+}
+
+async function chooseFile(file) {
+  if (!file) return;
+  if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) return notify('Please choose a JPG, PNG, or WEBP image.');
+  if (file.size > 10 * 1024 * 1024) return notify('Image must be smaller than 10 MB.');
+  clearDraft(false);
+  S.draft = { file, url: URL.createObjectURL(file), analysisId: null, aiEnabled: false, message: '', mealType: '', note: '', foods: [], busy: false, error: '' };
+  location.hash = '#/'; render();
+  await analyse();
+}
+function clearDraft(redraw = true) {
+  if (S.draft && S.draft.url) URL.revokeObjectURL(S.draft.url);
+  S.draft = null; if (redraw) render();
+}
+async function analyse() {
+  const d = S.draft; d.busy = true; d.error = ''; render();
+  try {
+    const form = new FormData(); form.append('file', d.file);
+    const r = await api('/analyze', { method: 'POST', body: form });
+    d.analysisId = r.analysis_id; d.aiEnabled = r.ai_enabled; d.message = r.message; d.foods = r.foods.map(newFood);
+  } catch (e) { d.error = e.message; }
+  d.busy = false; render();
+}
+async function saveDraft() {
+  const d = S.draft, { missing } = draftTotals();
+  if (!d.foods.length) return notify('Add at least one food item.');
+  if (missing) return notify('Every food needs a name, a portion, and nutrition values. Fix the items marked above.');
+  try {
+    await post('/meals', {
+      analysis_id: d.analysisId, meal_type: d.mealType || null, note: d.note, local_date: localDate(),
+      foods: d.foods.map((f) => ({ name: f.name.trim(), grams: Number(f.grams), ...(f.nutrition ? {} : { custom: Object.fromEntries(KEYS.map((k) => [k, Number(f.custom[k])])) }) })),
+    });
+    clearDraft(false); await refreshData(); notify('Meal saved.'); render();
+  } catch (e) { notify('Could not save the meal: ' + e.message); }
+}
+
+// ---------------------------------------------------------------------------------------------------- shared pieces
+function plate() {
+  return svg('svg', { class: 'plate', viewBox: '0 0 200 200', role: 'img', 'aria-label': 'A plate of food' },
+    svg('circle', { cx: 100, cy: 100, r: 96, fill: 'var(--soft)' }), svg('circle', { cx: 100, cy: 100, r: 76, fill: 'var(--card)', stroke: 'var(--line)', 'stroke-width': 3 }),
+    svg('path', { d: 'M100 100 L100 40 A60 60 0 0 1 152 70 Z', fill: 'var(--orange)' }), svg('path', { d: 'M100 100 L152 70 A60 60 0 0 1 100 160 Z', fill: 'var(--green)' }),
+    svg('path', { d: 'M100 100 L100 160 A60 60 0 0 1 48 70 Z', fill: 'var(--blue)' }), svg('path', { d: 'M100 100 L48 70 A60 60 0 0 1 100 40 Z', fill: 'var(--pink)' }),
+    svg('circle', { cx: 100, cy: 100, r: 18, fill: 'var(--card)' }));
+}
+function thumb(m) {
+  return m.image_url ? h('img', { class: 'thumb', src: m.image_url, alt: 'Photo of this meal', loading: 'lazy' }) : h('div', { class: 'thumb', 'aria-hidden': 'true' }, '🍽');
+}
+const mealTitle = (m) => m.foods.map((f) => f.name).join(', ');
+const mealWhen = (m) => `${new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}${m.meal_type ? ' · ' + m.meal_type : ''}`;
+
+function summaryPanel() {
+  const t = S.summary.today, g = S.targets;
+  const cp = t.protein_g * 4, cc = t.carbs_g * 4, cf = t.fat_g * 9, tot = cp + cc + cf;
+  const a = tot ? (cp / tot) * 100 : 0, b = tot ? a + (cc / tot) * 100 : 0;
+  const ring = h('div', { class: 'ring', style: tot ? `background:conic-gradient(var(--blue) 0 ${a}%,var(--orange) ${a}% ${b}%,var(--pink) ${b}% 100%)` : '', role: 'img', 'aria-label': `${r0(t.kcal)} of ${r0(g.kcal)} kilocalories logged today` },
+    h('div', { class: 'ring-inner' }, h('strong', {}, r0(t.kcal)), h('span', {}, `of ${r0(g.kcal)} kcal`)));
+  const bar = (label, v, target, cls) => h('div', { class: 'bar-row' }, h('div', { class: 'bar-label' }, h('span', { class: 'dot ' + cls }), label, h('b', {}, `${r0(v)} / ${r0(target)} g`)),
+    h('div', { class: 'track' }, h('div', { class: 'fill ' + cls, style: `width:${Math.min(100, (v / target) * 100 || 0)}%` })));
+  return h('div', { class: 'panel' }, h('div', { class: 'summary-body' }, ring,
+    h('div', { class: 'bars' }, bar('Protein', t.protein_g, g.protein_g, 'c-p'), bar('Carbs', t.carbs_g, g.carbs_g, 'c-c'), bar('Fat', t.fat_g, g.fat_g, 'c-f'))),
+    h('p', { class: 'notice' }, 'Targets are yours to set in Settings. They are general figures, not personal dietary advice.'));
+}
+
+// ---------------------------------------------------------------------------------------------------- views
+function homeView() {
+  const t = S.summary.today;
+  const hero = h('section', { class: 'hero' },
+    h('div', {}, h('div', { class: 'eyebrow' }, 'Your visual nutrition diary'), h('h1', { tabindex: -1 }, 'Understand your meals with the ', h('span', {}, 'power of AI')),
+      h('p', {}, 'Upload a photo of your meal, check the foods and portions the AI suggests, and get a rough nutrition estimate. Review, edit, and save to track your day.')),
+    h('div', { class: 'hero-visual' }, plate(), h('div', { class: 'cal-card' }, h('div', { class: 'small' }, 'Logged today'), h('h2', {}, r0(t.kcal), ' ', h('small', {}, 'kcal')),
+      ...[['Protein', t.protein_g, 'c-p'], ['Carbs', t.carbs_g, 'c-c'], ['Fat', t.fat_g, 'c-f']].map(([n, v, c]) => h('div', { class: 'macro-line' }, h('span', { class: 'dot ' + c }), n, h('b', {}, r0(v) + ' g'))))));
+
+  const input = h('input', { type: 'file', id: 'fileInput', accept: 'image/png,image/jpeg,image/webp', class: 'hidden', 'aria-label': 'Choose a meal photo', onchange: (e) => { chooseFile(e.target.files[0]); e.target.value = ''; } });
+  const drop = h('section', { class: 'upload', id: 'dropzone', 'aria-label': 'Upload a meal photo' }, h('div', { class: 'cloud', 'aria-hidden': 'true' }, '⇧'), h('h2', {}, 'Upload a photo of your meal'),
+    h('p', {}, 'Drag and drop an image here, or choose a file to browse.'), h('small', {}, 'JPG, PNG, WEBP · Max 10 MB · Location data is removed from your photo'), input,
+    h('div', { class: 'actions' }, h('button', { class: 'btn', id: 'chooseBtn', type: 'button', onclick: () => input.click() }, '＋ Choose image')));
+  drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('drag'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('drag'));
+  drop.addEventListener('drop', (e) => { e.preventDefault(); drop.classList.remove('drag'); chooseFile(e.dataTransfer.files[0]); });
+
+  const steps = h('section', {}, h('div', { class: 'section-head' }, h('h2', {}, 'How it works')),
+    h('ol', { class: 'steps' }, ...[['Upload meal photo', 'Choose a clear photo of your meal.'], ['AI suggests foods', 'Likely foods and portions appear for review.'], ['Review & edit', 'Fix names and portions. Add your own values for foods we do not know.'], ['Save and track', 'Your day, week and favourites build up automatically.']]
+      .map(([a, b], i) => h('li', { class: 'step' }, h('div', { class: 'num' }, i + 1), h('strong', {}, a), h('p', {}, b)))));
+
+  const recent = h('div', { class: 'panel' }, S.meals.length ? S.meals.slice(0, 4).map((m) => h('div', { class: 'meal-row' }, thumb(m), h('div', { class: 'info' }, h('strong', {}, mealTitle(m)), h('small', {}, `${fmtDay(m.local_date)} · ${mealWhen(m)} · ${r0(m.totals.kcal)} kcal`))))
+    : h('div', { class: 'empty' }, h('div', { class: 'bowl', 'aria-hidden': 'true' }, '🍽'), h('strong', {}, 'No meals logged yet'), h('p', {}, 'Upload your first meal photo to get started.'), h('button', { class: 'btn quiet', type: 'button', onclick: () => input.click() }, '＋ Upload a meal')));
+  const bottom = h('section', { class: 'bottom-grid' },
+    h('div', {}, h('div', { class: 'section-head' }, h('h2', {}, 'Recent meals'), h('a', { class: 'text-btn', href: '#/history' }, 'View all →')), recent),
+    h('div', {}, h('div', { class: 'section-head' }, h('h2', {}, "Today's summary")), summaryPanel()));
+  return [hero, drop, S.draft && reviewPanel(), steps, bottom];
+}
+
+function foodRow(f, i) {
+  const name = h('input', { value: f.name, list: 'foodNames', 'aria-label': 'Food item name', maxlength: 100 });
+  name.addEventListener('change', async () => { f.name = name.value.trim(); await lookup(f); render(); });
+  const qty = h('input', { type: 'number', min: 1, max: 5000, value: f.grams, 'aria-label': 'Portion in grams', inputmode: 'decimal' });
+  qty.addEventListener('input', () => { f.grams = qty.value; updateTotals(); });
+  let status;
+  if (f.nutrition) {
+    const how = { exact: 'Matched', alias: `Matched as “${f.matched_name}”`, variant: `Matched as “${f.matched_name}”`, close: `Closest match: “${f.matched_name}”. Check that this is right.` }[f.match];
+    status = h('div', { class: 'match' + (f.match === 'close' ? ' warn' : '') }, f.match === 'exact' ? `Matched “${f.matched_name}” · ${r0(f.nutrition.kcal)} kcal per 100 g` : `${how} · ${r0(f.nutrition.kcal)} kcal per 100 g`);
+  } else {
+    const inputs = [['kcal', 'kcal'], ['protein_g', 'Protein g'], ['carbs_g', 'Carbs g'], ['fat_g', 'Fat g']].map(([k, label]) => {
+      const el = h('input', { type: 'number', min: 0, step: 'any', value: f.custom[k], 'aria-label': `${f.name || 'Food'}: ${label} per 100 g`, inputmode: 'decimal' });
+      el.addEventListener('input', () => { f.custom[k] = el.value; updateTotals(); });
+      return h('div', { class: 'field' }, h('span', { class: 'lab' }, label), el);
+    });
+    status = h('div', { class: 'grid' }, h('div', { class: 'match warn' }, `No nutrition record for “${f.name || 'this food'}”. Rename it to a known food, or type its values per 100 g (from the package or a trusted source).`), h('div', { class: 'custom-grid' }, inputs));
+  }
+  return h('div', { class: 'food' }, h('div', { class: 'food-row' }, h('div', { class: 'field' }, h('label', {}, 'Food item'), name), h('div', { class: 'field' }, h('label', {}, 'Portion (g)'), qty),
+    h('button', { class: 'remove', type: 'button', 'aria-label': 'Remove ' + (f.name || 'item'), title: 'Remove', onclick: () => { S.draft.foods.splice(i, 1); render(); } }, '×')),
+    f.confidence && f.confidence !== 'manual-review' && h('div', {}, h('span', { class: 'badge' }, 'AI confidence: ' + f.confidence)), status);
+}
+function updateTotals() {
+  const el = $('#totalLine'); if (!el || !S.draft) return;
+  const { t, missing } = draftTotals();
+  el.textContent = missing ? `${macroLine(t)} · ${missing} item${missing > 1 ? 's' : ''} need${missing > 1 ? '' : 's'} attention` : 'Estimated ' + macroLine(t);
+}
+function reviewPanel() {
+  const d = S.draft;
+  const head = h('div', { class: 'section-head' }, h('h2', {}, 'Review detected foods'), h('button', { class: 'text-btn', type: 'button', onclick: () => { clearDraft(); notify('Photo removed.'); } }, 'Remove photo'));
+  if (d.busy) return h('section', { style: 'margin-bottom:28px' }, head, h('div', { class: 'panel', role: 'status' }, h('div', { class: 'meal-result' }, h('img', { class: 'preview', src: d.url, alt: 'Your meal photo' }), h('div', {}, h('strong', {}, 'Analysing your photo…'), h('p', { class: 'muted' }, 'This can take up to a minute.')))));
+  if (d.error) return h('section', { style: 'margin-bottom:28px' }, head, h('div', { class: 'panel' }, h('div', { class: 'banner', role: 'alert' }, d.error), h('div', { class: 'actions', style: 'justify-content:flex-start' }, h('button', { class: 'btn', type: 'button', onclick: analyse }, 'Try again'))));
+  const type = h('select', { id: 'mealType', 'aria-label': 'Meal type' }, h('option', { value: '' }, 'Meal type (optional)'), ['breakfast', 'lunch', 'dinner', 'snack'].map((x) => h('option', { value: x, selected: d.mealType === x }, x[0].toUpperCase() + x.slice(1))));
+  type.addEventListener('change', () => { d.mealType = type.value; });
+  const note = h('input', { id: 'mealNote', value: d.note, maxlength: 300, placeholder: 'Note (optional)', 'aria-label': 'Note' }); note.addEventListener('input', () => { d.note = note.value; });
+  const save = h('button', { class: 'btn', type: 'button', id: 'saveBtn', onclick: saveDraft }, 'Save meal');
+  return h('section', { style: 'margin-bottom:28px' }, head, h('div', { class: 'panel' },
+    !d.aiEnabled && h('div', { class: 'banner' }, d.message), d.aiEnabled && d.message && h('p', { class: 'notice', style: 'margin:0 0 12px' }, d.message),
+    h('div', { class: 'meal-result' }, h('img', { class: 'preview', src: d.url, alt: 'Your meal photo' }),
+      h('div', {}, h('div', { class: 'eyebrow', style: 'margin-bottom:10px' }, 'Editable food list'), h('div', { class: 'food-list' }, d.foods.map(foodRow)),
+        h('div', { style: 'margin-top:10px' }, h('button', { class: 'btn quiet', type: 'button', id: 'addFood', onclick: () => { d.foods.push(newFood({ name: '', grams: 100 })); render(); $$last('.food input'); } }, '＋ Add food item')),
+        h('div', { class: 'row2' }, type, note))),
+    h('div', { class: 'result-footer' }, h('div', {}, h('strong', { id: 'totalLine' }), h('div', { class: 'notice', style: 'margin:4px 0 0' }, 'Estimates only. Portions and foods can be wrong, so check every item. Not medical advice.')), save)));
+}
+function $$last(sel) { const all = document.querySelectorAll(sel); const el = [...all].filter((e) => e.getAttribute('aria-label') === 'Food item name').pop(); if (el) el.focus(); }
+
+function historyView() {
+  const groups = new Map();
+  for (const m of S.meals) { if (!groups.has(m.local_date)) groups.set(m.local_date, []); groups.get(m.local_date).push(m); }
+  const body = S.meals.length ? [...groups].map(([day, ms]) => {
+    const tot = ms.reduce((a, m) => { for (const k of KEYS) a[k] += m.totals[k]; return a; }, { kcal: 0, protein_g: 0, carbs_g: 0, fat_g: 0 });
+    return h('section', { class: 'day' }, h('h2', {}, h('span', {}, fmtDay(day)), h('span', {}, macroLine(tot))), h('div', { class: 'panel' }, ms.map((m) => h('div', { class: 'card-meal' }, thumb(m),
+      h('div', { class: 'info' }, h('strong', {}, mealTitle(m)), h('div', { class: 'muted', style: 'font-size:13px' }, `${mealWhen(m)} · ${macroLine(m.totals)}`),
+        m.foods.map((f) => f.grams && h('span', { class: 'badge', style: 'margin:6px 6px 0 0' }, `${f.name} ${r0(f.grams)} g`)), m.note && h('div', { class: 'muted', style: 'font-size:13px;margin-top:6px' }, '“' + m.note + '”')),
+      h('div', { class: 'del' }, h('button', { class: 'btn danger', type: 'button', 'aria-label': 'Delete this meal: ' + mealTitle(m), onclick: async () => {
+        if (!confirm('Delete this meal and its photo?')) return;
+        try { await api('/meals/' + m.id, { method: 'DELETE' }); await refreshData(); notify('Meal deleted.'); render(); } catch (e) { notify(e.message); }
+      } }, 'Delete'))))));
+  }) : [h('div', { class: 'panel empty' }, h('div', { class: 'bowl', 'aria-hidden': 'true' }, '🍽'), h('strong', {}, 'No meals saved in the last 30 days'), h('a', { class: 'btn', href: '#/' }, 'Log a meal'))];
+  return [h('div', { class: 'page-head' }, h('div', {}, h('div', { class: 'eyebrow' }, 'Last 30 days'), h('h1', { tabindex: -1 }, 'Meal History'))), ...body];
+}
+
+let insightDays = 7;
+function insightsView() {
+  const root = h('div', {}); loadInsights(root); return [h('div', { class: 'page-head' }, h('div', {}, h('div', { class: 'eyebrow' }, 'Your patterns'), h('h1', { tabindex: -1 }, 'Nutrition Insights')),
+    h('div', { class: 'field' }, h('label', { for: 'range' }, 'Period'), h('select', { id: 'range', onchange: (e) => { insightDays = Number(e.target.value); render(); } }, [7, 14, 30].map((n) => h('option', { value: n, selected: insightDays === n }, `Last ${n} days`))))), root];
+}
+async function loadInsights(root) {
+  let s; try { s = await api(`/summary?days=${insightDays}&today=${localDate()}`); } catch (e) { return root.replaceChildren(h('div', { class: 'banner' }, e.message)); }
+  const g = s.targets, a = s.average_per_logged_day;
+  if (!s.logged_days) return root.replaceChildren(h('div', { class: 'panel empty' }, h('strong', {}, 'Nothing to chart yet'), h('p', {}, 'Save a few meals and your trends will appear here.'), h('a', { class: 'btn', href: '#/' }, 'Log a meal')));
+  const stat = (v, l) => h('div', { class: 'stat' }, h('b', {}, v), h('span', {}, l));
+  const W = 700, H = 250, L = 40, B = 28, T = 14, iw = W - L - 8, ih = H - B - T, max = Math.max(g.kcal * 1.15, ...s.days.map((d) => d.kcal)), y = (v) => T + ih - (v / max) * ih, bw = iw / s.days.length;
+  const chart = svg('svg', { class: 'chart', viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': `Daily calories for the last ${insightDays} days against a target of ${r0(g.kcal)}. The table below has the same numbers.` },
+    ...[0, 0.5, 1].map((p) => svg('g', {}, svg('line', { class: 'axis', x1: L, x2: W - 8, y1: y(max * p / 1.0), y2: y(max * p / 1.0) }), svg('text', { x: L - 6, y: y(max * p) + 4, 'text-anchor': 'end' }, r0(max * p)))),
+    svg('line', { class: 'target', x1: L, x2: W - 8, y1: y(g.kcal), y2: y(g.kcal) }), svg('text', { x: W - 8, y: y(g.kcal) - 5, 'text-anchor': 'end' }, 'target'),
+    ...s.days.map((d, i) => { const x = L + i * bw + bw * 0.15, hh = Math.max(d.kcal ? 2 : 0, ih - (y(d.kcal) - T)); return svg('g', {}, svg('rect', { class: 'bar' + (d.kcal > g.kcal ? ' over' : ''), x, y: T + ih - hh, width: bw * 0.7, height: hh, rx: 3 }, svg('title', {}, `${fmtDay(d.date)}: ${r0(d.kcal)} kcal`)),
+      (insightDays <= 14 || i % 5 === 0) && svg('text', { x: x + bw * 0.35, y: H - 8, 'text-anchor': 'middle' }, parseDay(d.date).toLocaleDateString(undefined, insightDays <= 7 ? { weekday: 'short' } : { day: 'numeric', month: 'short' }))); }));
+  const table = h('table', { class: 'sr' }, h('caption', {}, 'Calories per day'), h('tbody', {}, s.days.map((d) => h('tr', {}, h('th', { scope: 'row' }, d.date), h('td', {}, `${r0(d.kcal)} kcal`)))));
+  root.replaceChildren(
+    h('div', { class: 'stats' }, stat(r0(a.kcal), 'kcal per logged day'), stat(`${s.logged_days} / ${insightDays}`, 'days with meals'), stat(r0(a.protein_g) + ' g', 'protein per logged day'), stat(r0(a.carbs_g) + ' g · ' + r0(a.fat_g) + ' g', 'carbs · fat per logged day')),
+    h('div', { class: 'panel', style: 'margin-bottom:22px' }, h('h2', { style: 'font-size:16px;margin-bottom:10px' }, 'Calories per day'), chart, table, h('p', { class: 'notice' }, 'Bars above the dashed line are over your daily calorie target (pink). Totals depend on rough nutrition estimates.')),
+    h('div', { class: 'panel' }, h('h2', { style: 'font-size:16px;margin-bottom:10px' }, 'Most logged foods'), h('ul', { class: 'toplist' }, s.top_foods.map((f) => h('li', {}, h('span', {}, f.name), h('span', { class: 'muted' }, `${f.times}× · ${f.grams} g`))))));
+}
+
+function settingsView() {
+  const t = S.targets, f = {};
+  const field = (k, label, max) => { f[k] = h('input', { id: 't_' + k, type: 'number', min: k === 'kcal' ? 500 : 0, max, step: 'any', value: t[k], inputmode: 'decimal' }); return h('div', { class: 'field' }, h('label', { for: 't_' + k }, label), f[k]); };
+  const form = h('form', { class: 'panel stack', onsubmit: async (e) => {
+    e.preventDefault();
+    try { const r = await api('/settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Object.fromEntries(KEYS.map((k) => [k, Number(f[k].value)]))) }); S.targets = r.targets; await refreshData(); notify('Targets saved.'); }
+    catch (err) { notify(err.message); }
+  } }, h('div', {}, h('h2', { style: 'font-size:18px' }, 'Daily targets'), h('p', { class: 'muted', style: 'margin:4px 0 0;font-size:14px' }, 'Used for the bars and charts. Pick numbers that suit you; HiperMeal does not give dietary advice.')),
+    h('div', { class: 'form-grid' }, field('kcal', 'Calories (kcal)', 10000), field('protein_g', 'Protein (g)', 500), field('carbs_g', 'Carbs (g)', 1500), field('fat_g', 'Fat (g)', 500)), h('div', {}, h('button', { class: 'btn', type: 'submit' }, 'Save targets')));
+  const cur = Theme.get() || 'system';
+  const radio = (v, label) => h('label', {}, h('input', { type: 'radio', name: 'theme', value: v, checked: cur === v, onchange: () => Theme.set(v === 'system' ? null : v) }), label);
+  const look = h('div', { class: 'panel stack' }, h('h2', { style: 'font-size:18px' }, 'Appearance'), h('div', { class: 'seg', role: 'radiogroup', 'aria-label': 'Theme' }, radio('system', 'Match my device'), radio('light', 'Light'), radio('dark', 'Dark')));
+  const hh = S.health || {};
+  const privacy = h('div', { class: 'panel stack' }, h('h2', { style: 'font-size:18px' }, 'Your data'),
+    h('p', { class: 'muted', style: 'margin:0;font-size:14px' }, 'Meals and photos are stored on the computer running HiperMeal, with no sign-in, so keep this app on your own machine or network. Photos are stripped of location data. A photo you analysed but never saved is deleted automatically after 24 hours. Deleting a meal deletes its photo.'),
+    h('div', {}, h('button', { class: 'btn danger', type: 'button', id: 'wipeBtn', onclick: async () => {
+      if (!confirm('Delete ALL meals and photos permanently?')) return;
+      try { await api('/data', { method: 'DELETE' }); await refreshData(); notify('Everything was deleted.'); render(); } catch (e) { notify(e.message); }
+    } }, 'Delete all my data')));
+  const about = h('div', { class: 'panel stack' }, h('h2', { style: 'font-size:18px' }, 'About this install'),
+    h('p', { style: 'margin:0;font-size:14px' }, hh.ai_configured ? `AI recognition is on (model ${hh.model}).` : 'AI recognition is off: no API key is set, so photos get demo suggestions instead of real analysis. Add GEMINI_API_KEY to enable it (see the README).'),
+    h('p', { class: 'muted', style: 'margin:0;font-size:13px' }, `${hh.nutrition_records || '…'} foods in the built-in table. Values are rounded approximations, not a verified food database.`));
+  return [h('div', { class: 'page-head' }, h('div', {}, h('div', { class: 'eyebrow' }, 'Make it yours'), h('h1', { tabindex: -1 }, 'Settings'))), h('div', { class: 'stack' }, form, look, privacy, about)];
+}
+
+// ---------------------------------------------------------------------------------------------------- router
+const ROUTES = { '': homeView, '/': homeView, '/history': historyView, '/insights': insightsView, '/settings': settingsView };
+let lastRoute = null;
+function render() {
+  const path = location.hash.replace(/^#/, '');
+  const view = ROUTES[path];
+  const name = view ? (path === '' || path === '/' ? 'home' : path.slice(1)) : null;
+  for (const a of document.querySelectorAll('[data-route]')) { if (a.dataset.route === name) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); }
+  const root = $('#view');
+  if (!view) { root.replaceChildren(h('div', { class: 'panel stack' }, h('h1', { tabindex: -1 }, 'Page not found'), h('p', { class: 'muted' }, 'There is nothing at this address.'), h('div', {}, h('a', { class: 'btn', href: '#/' }, 'Back to Home')))); return; }
+  const keep = document.activeElement && document.activeElement.id;
+  root.replaceChildren(...[].concat(view()).filter(Boolean));
+  const dl = $('#foodNames'); if (!dl) root.append(h('datalist', { id: 'foodNames' }, S.foodNames.map((n) => h('option', { value: n }))));
+  updateTotals();
+  if (lastRoute !== path) { const t = $('h1', root); if (t) { t.tabIndex = -1; t.focus({ preventScroll: true }); } window.scrollTo(0, 0); }
+  else if (keep) { const el = document.getElementById(keep); if (el) el.focus(); }
+  lastRoute = path;
+}
+
+async function boot() {
+  $('#themeBtn').addEventListener('click', () => Theme.set(Theme.current() === 'dark' ? 'light' : 'dark'));
+  Theme.paint();
+  window.addEventListener('hashchange', render);
+  window.addEventListener('beforeunload', (e) => { if (S.draft && S.draft.foods.length) { e.preventDefault(); e.returnValue = ''; } });     // an unsaved review would be lost
+  try {
+    const [, foods, health] = await Promise.all([refreshData(), api('/foods'), api('/health')]);
+    S.foodNames = foods.foods; S.health = health;
+  } catch (e) {
+    $('#view').replaceChildren(h('div', { class: 'panel stack' }, h('h1', {}, 'Could not load HiperMeal'), h('div', { class: 'banner', role: 'alert' }, e.message), h('div', {}, h('button', { class: 'btn', type: 'button', onclick: () => location.reload() }, 'Try again'))));
+    return;
+  }
+  render();
+}
+boot();
