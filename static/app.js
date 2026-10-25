@@ -62,19 +62,20 @@ const post = (path, body, extra = {}) => api(path, { method: 'POST', headers: { 
 const AIKey = {
   read() {
     for (const st of [sessionStorage, localStorage]) {
-      try { const v = st.getItem('hm_ai'); if (v) { const o = JSON.parse(v); return { key: o.key || '', model: o.model || '', remember: st === localStorage }; } } catch { /* storage blocked or corrupt: treat as empty */ }
+      try { const v = st.getItem('hm_ai'); if (v) { const o = JSON.parse(v); return { key: o.key || '', model: o.model || '', backup: o.backup || '', remember: st === localStorage }; } } catch { /* storage blocked or corrupt: treat as empty */ }
     }
-    return { key: '', model: '', remember: false };
+    return { key: '', model: '', backup: '', remember: false };
   },
-  save(key, model, remember) {
+  save(key, model, remember, backup = '') {
     this.clear();
-    try { (remember ? localStorage : sessionStorage).setItem('hm_ai', JSON.stringify({ key, model })); return true; } catch { return false; }
+    try { (remember ? localStorage : sessionStorage).setItem('hm_ai', JSON.stringify({ key, model, backup })); return true; } catch { return false; }
   },
   clear() { for (const st of [sessionStorage, localStorage]) { try { st.removeItem('hm_ai'); } catch { /* ignore */ } } },
   headers(over) {
-    const { key, model } = over || this.read(); const hd = {};
+    const { key, model, backup } = over || this.read(); const hd = {};
     if (key) hd['X-Gemini-Key'] = key;
     if (model) hd['X-Gemma-Model'] = model;
+    if (backup) hd['X-Gemma-Backup-Model'] = backup;
     return hd;
   },
   mask(k) { return k.length > 10 ? k.slice(0, 4) + '…' + k.slice(-4) : '••••'; },
@@ -209,6 +210,7 @@ async function analyse() {
       onSent: () => { d.stage = 'analyse'; d.t0 = Date.now(); paintProgress(); },
     });
     d.analysisId = r.analysis_id; d.aiEnabled = r.ai_enabled; d.message = r.message; d.foods = r.foods.map(newFood);
+    d.fallbackUsed = !!r.fallback_used; d.modelUsed = r.model_used || '';
     if (d.url.startsWith('blob:')) URL.revokeObjectURL(d.url);
     d.url = `/api/photos/${r.analysis_id}`;                   // the server's cleaned JPEG: shows even for HEIC, which browsers cannot display
   } catch (e) { d.error = e.cancelled ? 'Analysis cancelled.' : e.message; }
@@ -345,6 +347,7 @@ function reviewPanel() {
   const note = h('input', { id: 'mealNote', value: d.note, maxlength: 300, placeholder: 'Note (optional)', 'aria-label': 'Note' }); note.addEventListener('input', () => { d.note = note.value; });
   const save = h('button', { class: 'btn', type: 'button', id: 'saveBtn', onclick: saveDraft }, 'Save meal');
   return h('section', { id: 'analysis', style: 'margin-bottom:28px;scroll-margin-top:84px' }, head, h('div', { class: 'panel' },
+    d.fallbackUsed && h('div', { class: 'banner', role: 'status' }, `The main Gemma model was busy, so the backup model (${d.modelUsed}) analysed this photo. Check the foods and portions as usual.`),
     !d.aiEnabled && h('div', { class: 'banner' }, d.message, ' ', h('a', { href: '#/settings' }, 'Open Settings')), d.aiEnabled && d.message && h('p', { class: 'notice', style: 'margin:0 0 12px' }, d.message),
     h('div', { class: 'meal-result' }, previewImg(d.url),
       h('div', {}, h('div', { class: 'eyebrow', style: 'margin-bottom:10px' }, 'Editable food list'), h('div', { class: 'food-list' }, d.foods.map(foodRow)),
@@ -397,15 +400,17 @@ function aiPanel() {
   const cur = AIKey.read(), hh = S.health || {};
   const keyIn = h('input', { id: 'aiKey', type: 'password', autocomplete: 'off', spellcheck: 'false', placeholder: cur.key ? `Saved: ${AIKey.mask(cur.key)} (paste a new key to replace it)` : 'Paste your Gemma API key', 'aria-label': 'Gemma API key' });
   const modelIn = h('input', { id: 'aiModel', value: cur.model, autocomplete: 'off', spellcheck: 'false', placeholder: hh.model || 'gemma-4-31b-it', 'aria-label': 'Model name' });
+  const backupIn = h('input', { id: 'aiBackup', value: cur.backup, autocomplete: 'off', spellcheck: 'false', placeholder: hh.backup_model || 'none', 'aria-label': 'Backup model' });
   const remember = h('input', { id: 'aiRemember', type: 'checkbox', checked: cur.remember });
   const status = h('p', { class: 'match', id: 'aiStatus', role: 'status' });
   const state = cur.key ? `Using your key ${AIKey.mask(cur.key)} (${cur.remember ? 'remembered on this device' : 'this browser session only'}), model ${cur.model || hh.model || 'gemma-4-31b-it'}.`
     : hh.ai_configured ? `Using the key set on the server, model ${cur.model || hh.model}.` : 'No key yet: photos get demo suggestions instead of a real analysis.';
   const typed = () => {
-    const key = keyIn.value.trim() || cur.key, model = modelIn.value.trim();
+    const key = keyIn.value.trim() || cur.key, model = modelIn.value.trim(), backup = backupIn.value.trim();
     if (key && !AIKey.valid(key)) { status.textContent = 'That does not look like an API key. Paste just the key, with no spaces.'; status.className = 'match warn'; return null; }
     if (model && !/^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$/.test(model)) { status.textContent = 'That does not look like a model name, for example gemma-4-31b-it.'; status.className = 'match warn'; return null; }
-    return { key, model };
+    if (backup && !/^(none|off)$/i.test(backup) && !/^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$/.test(backup)) { status.textContent = 'That does not look like a backup model name. Use a model name, or write none to turn the backup off.'; status.className = 'match warn'; return null; }
+    return { key, model, backup };
   };
   const test = async (btn) => {
     const v = typed(); if (!v) return;
@@ -418,13 +423,14 @@ function aiPanel() {
   return h('div', { class: 'panel stack', id: 'aiPanel' }, h('h2', { style: 'font-size:18px' }, 'AI photo recognition (Gemma 4)'),
     h('p', { style: 'margin:0;font-size:14px' }, state),
     insecureTransport() && h('div', { class: 'banner', role: 'alert' }, 'This page is not HTTPS, so a key you enter would travel unencrypted. Use the app on localhost or over HTTPS before entering a key.'),
-    h('div', { class: 'form-grid' }, h('div', { class: 'field' }, h('label', { for: 'aiKey' }, 'Your Gemma API key'), keyIn), h('div', { class: 'field' }, h('label', { for: 'aiModel' }, 'Model'), modelIn)),
+    h('div', { class: 'form-grid' }, h('div', { class: 'field' }, h('label', { for: 'aiKey' }, 'Your Gemma API key'), keyIn), h('div', { class: 'field' }, h('label', { for: 'aiModel' }, 'Model'), modelIn),
+      h('div', { class: 'field' }, h('label', { for: 'aiBackup' }, 'Backup model (used if the main one stays busy; write none to turn off)'), backupIn)),
     h('label', { class: 'check' }, remember, ' Remember the key on this device (otherwise it is forgotten when you close the tab)'),
     h('div', { class: 'actions', style: 'justify-content:flex-start' },
       h('button', { class: 'btn', type: 'button', id: 'aiSave', onclick: () => {
         const v = typed(); if (!v) return;
         if (!v.key) { status.textContent = 'Paste a key first.'; status.className = 'match warn'; return; }
-        if (!AIKey.save(v.key, v.model, remember.checked)) { status.textContent = 'This browser would not let the key be saved.'; status.className = 'match warn'; return; }
+        if (!AIKey.save(v.key, v.model, remember.checked, v.backup)) { status.textContent = 'This browser would not let the key be saved.'; status.className = 'match warn'; return; }
         notify('Key saved in this browser.'); render();
       } }, 'Save key'),
       h('button', { class: 'btn quiet', type: 'button', id: 'aiTest', onclick: (e) => test(e.target) }, 'Test key'),

@@ -93,18 +93,21 @@ def rate_limit(request: Request, limit: int = 20, window: int = 60, bucket: str 
 class Creds:
     """A Gemma API key (and optionally a model) the person entered in the app. It arrives in a header with the one request that needs it, goes straight to
     Google, and is never stored, logged or echoed by this server. Without one, the key in the server's environment (if any) is used."""
-    def __init__(self, key: str | None, model: str | None):
-        self.key, self.model = key, model
+    def __init__(self, key: str | None, model: str | None, backup: str | None = None):
+        self.key, self.model, self.backup = key, model, backup
 
 
-def creds(x_gemini_key: str | None = Header(None), x_gemma_model: str | None = Header(None)) -> Creds:
+def creds(x_gemini_key: str | None = Header(None), x_gemma_model: str | None = Header(None), x_gemma_backup_model: str | None = Header(None)) -> Creds:
     key = (x_gemini_key or "").strip() or None
     model = (x_gemma_model or "").strip() or None
     if key is not None and not ai.VALID_KEY.match(key):
         raise HTTPException(422, "That does not look like an API key. Paste just the key, with no spaces.")
     if model is not None and not ai.VALID_MODEL.match(model):
         raise HTTPException(422, "That does not look like a model name, for example gemma-4-31b-it.")
-    return Creds(key, model)
+    backup = (x_gemma_backup_model or "").strip() or None
+    if backup is not None and backup.lower() not in ("none", "off") and not ai.VALID_MODEL.match(backup):
+        raise HTTPException(422, "That does not look like a backup model name, for example gemma-4-26b-a4b-it (or write none to turn the backup off).")
+    return Creds(key, model, backup)
 
 
 # ----------------------------------------------------------------------------------------------------------- models
@@ -201,7 +204,7 @@ def prepare_image(contents: bytes) -> bytes:
 # ----------------------------------------------------------------------------------------------------------- routes
 @app.get("/api/health")
 def health() -> dict[str, Any]:
-    return {"status": "ok", "service": "HiperMeal API", "version": app.version, "ai_configured": ai.server_key_set(), "model": ai.model_name(), "ai_mode": ai.mode(), "image_formats": image_formats(),
+    return {"status": "ok", "service": "HiperMeal API", "version": app.version, "ai_configured": ai.server_key_set(), "model": ai.model_name(), "ai_mode": ai.mode(), "backup_model": ai.backup_model(), "image_formats": image_formats(),
             "nutrition_records": len(nutrition.NUTRITION)}
 
 
@@ -220,8 +223,9 @@ async def analyze_image(request: Request, file: UploadFile = File(...), hint: st
     analysis_id = str(uuid.uuid4())
     store.upload_path(analysis_id).write_bytes(jpeg)         # kept only if the meal is saved (see purge_orphan_photos)
 
+    ai.served_by.set(None)
     try:
-        suggestions = await ai.analyse(jpeg, hint, c.key, c.model)
+        suggestions = await ai.analyse(jpeg, hint, c.key, c.model, c.backup)
     except ai.AIError as e:
         raise HTTPException(502, str(e))
     ai_enabled = suggestions is not None
@@ -238,7 +242,8 @@ async def analyze_image(request: Request, file: UploadFile = File(...), hint: st
         else:
             row["notes"] = "No nutrition record for this name. Pick a known food or type its values per 100 g."
         foods.append(row)
-    return {"analysis_id": analysis_id, "ai_enabled": ai_enabled, "foods": foods,
+    used = ai.served_by.get()
+    return {"analysis_id": analysis_id, "ai_enabled": ai_enabled, "foods": foods, "model_used": used, "fallback_used": bool(used and used != ai.model_name(c.model)),
             "message": ("AI suggestions generated. Food identity and portion size may be wrong; review each item." if ai_enabled else
                         "AI vision is not set up (no API key), so these are demo suggestions for trying the app, not an analysis of your photo. Add your Gemma API key in Settings to analyse real photos.")}
 
@@ -272,7 +277,8 @@ async def nutrition_estimate(request: Request, body: EstimateInput, c: Creds = D
         raise HTTPException(503, "AI estimates need an API key. Add yours in Settings, or type the values yourself.")
     rate_limit(request, limit=30, bucket="estimate")
     try:
-        e = await ai.estimate(" ".join(body.food_name.split()), c.key, c.model)
+        ai.served_by.set(None)
+        e = await ai.estimate(" ".join(body.food_name.split()), c.key, c.model, c.backup)
     except ai.AIError as exc:
         raise HTTPException(502, str(exc))
     return {"nutrition": {k: e[k] for k in nutrition.KEYS}, "note": e["note"], "estimated_by": "ai", "basis": "per 100 g"}

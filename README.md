@@ -46,7 +46,9 @@ Without a key everything still works, but analysing a photo returns three clearl
 - **Strict answers, with a safety net.** The request starts with a JSON schema; if the API says that mode is not supported for the model, it steps down to plain JSON mode and then to prompt-only JSON, and remembers which worked. A 400 about the key, the model or the image never triggers a step-down.
 - **Estimates for unknown foods.** For a food the table does not know, **Ask Gemma 4 to estimate** fills in rough per-100-g values (checked for physical sense: macros cannot exceed 100 g, calories must match the macros). You check them before saving; they are stored as your own values.
 - **Cuisine hint.** An optional hint on the upload box ("Indian", "Italian", …) helps with look-alike dishes.
-- Requests time out after 60 seconds and retry once on a temporary failure.
+- Requests time out after 60 seconds. **Temporary failures are retried with growing waits**: a busy or erroring Google server (HTTP 500/503/504) up to three times (1.5, 4 and 9 seconds), a rate limit once, a dropped connection twice, all within about 75 seconds.
+- **Backup model.** If the main model is still overloaded after those retries, the request is tried once on a backup model (default `gemma-4-26b-a4b-it`; change it with `GEMMA_BACKUP_MODEL` or in Settings, or write `none` to turn it off). The review screen says when the backup answered. A backup is only used for overload errors, never for a bad key, a missing model or a quota problem, since another model would not fix those. If the backup also fails, you are told about the main model's problem.
+- Errors show Google's own explanation, for example "HTTP 503: This model is currently experiencing high demand".
 
 ## What it does
 
@@ -78,7 +80,7 @@ The original upload is the first commit in this repository, so you can diff agai
 - Privacy: unsaved photos are deleted after 24 hours, deleting a meal deletes its photo, one-click delete-all, no third-party fonts or images, a strict content security policy.
 - Robustness: rate limit on photo analysis, model timeout and one retry, tolerant parsing of the model's answer, validated ids, in-place upgrade of databases created by the first version.
 - Accessibility: keyboard and screen-reader friendly, no automated-audit violations in light or dark at desktop or phone width.
-- 138 automated tests, plus browser tests of every page, the progress bar (under a throttled connection), every image type and the key flow.
+- 145 automated tests, plus browser tests of every page, the progress bar (under a throttled connection), every image type and the key flow.
 
 ## API
 

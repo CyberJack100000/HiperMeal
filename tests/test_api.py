@@ -51,7 +51,7 @@ def test_demo_mode_is_clearly_labelled(client):
 
 
 def test_ai_suggestions_are_matched_and_unknowns_are_flagged(client, monkeypatch):
-    async def fake(jpeg, hint=None, key=None, model=None):
+    async def fake(jpeg, hint=None, key=None, model=None, backup=None):
         return [{"name": "chapati", "grams": 70, "confidence": "high"}, {"name": "lamb vindaloo", "grams": 200, "confidence": "low"}]
     monkeypatch.setattr(ai, "analyse", fake)
     d = upload(client, png()).json()
@@ -62,7 +62,7 @@ def test_ai_suggestions_are_matched_and_unknowns_are_flagged(client, monkeypatch
 
 
 def test_ai_failure_is_a_502_with_no_provider_details(client, monkeypatch):
-    async def boom(jpeg, hint=None, key=None, model=None):
+    async def boom(jpeg, hint=None, key=None, model=None, backup=None):
         raise ai.AIError("Gemma 4 image recognition failed. Check the API key.")
     monkeypatch.setattr(ai, "analyse", boom)
     r = upload(client, png())

@@ -13,9 +13,11 @@ How the request is made, and why:
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import os
 import re
+import time
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -29,7 +31,18 @@ CUISINES = ("indian", "chinese", "italian", "mexican", "middle eastern", "japane
 
 
 class AIError(Exception):
-    """The model request failed or returned something unusable. The message is safe to show to the user."""
+    """The model request failed or returned something unusable. The message is safe to show to the user. `status` is Google's HTTP status when there was one."""
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
+
+
+# Which model actually answered the current request (set by analyse/estimate; read by the endpoint right after). None when no model was called.
+served_by: contextvars.ContextVar[str | None] = contextvars.ContextVar("served_by", default=None)
+DEFAULT_BACKUP = "gemma-4-26b-a4b-it"
+OVERLOADED = (500, 503, 504)
+RETRY_DELAYS = {"server": (1.5, 4.0, 9.0), "quota": (3.0,), "network": (1.5, 4.0)}      # seconds to wait before each retry, by kind of failure
+DEADLINE_S = 75.0                                                                        # stop retrying after this long overall
 
 
 class FoodItem(BaseModel):
@@ -67,6 +80,12 @@ def server_key_set() -> bool:
 
 def model_name(model: str | None = None) -> str:
     return (model or os.getenv("GEMMA_MODEL", "")).strip() or "gemma-4-31b-it"
+
+
+def backup_model(backup: str | None = None) -> str | None:
+    """The model to try when the main one stays overloaded. `none`/`off`/empty turns it off."""
+    v = (backup if backup is not None else os.getenv("GEMMA_BACKUP_MODEL", DEFAULT_BACKUP)).strip()
+    return None if v.lower() in ("", "none", "off") else v
 
 
 VALID_KEY = re.compile(r"^[\x21-\x7e]{16,256}$")                 # printable ASCII, no spaces
@@ -199,11 +218,19 @@ def soft_400(e: Exception) -> bool:
     return _status_code(e) == 400 and not is_key_problem(e)
 
 
-def transient(e: Exception) -> bool:
+def retry_kind(e: Exception) -> str | None:
+    """What sort of temporary failure this is (so it gets the right waits), or None when retrying cannot help."""
     c = _status_code(e)
     if c is None:                                           # no HTTP status: only network-type failures are worth a retry, not programming errors
-        return isinstance(e, (OSError, TimeoutError)) or any(w in type(e).__name__.lower() for w in ("timeout", "connect", "network", "protocol"))
-    return c == 429 or c >= 500
+        net = isinstance(e, (OSError, TimeoutError)) or any(w in type(e).__name__.lower() for w in ("timeout", "connect", "network", "protocol"))
+        return "network" if net else None
+    if c == 429:
+        return "quota"
+    return "server" if c >= 500 else None
+
+
+def transient(e: Exception) -> bool:
+    return retry_kind(e) is not None
 
 
 def redact(msg: str, key: str | None) -> str:
@@ -232,6 +259,9 @@ def friendly(e: Exception, model: str, key: str | None = None) -> str:
         return "Google says this key is out of quota or is being rate-limited. Wait a bit and try again."
     if isinstance(e, ImportError):
         return "The google-genai package is not installed on the server. Run: python -m pip install -r requirements.txt"
+    if code in OVERLOADED:
+        why = provider_reason(e, key)
+        return f"Google's {model} is busy or having a problem right now (HTTP {code}{': ' + why if why else ''}). This is usually temporary: try again in a minute."
     why = provider_reason(e, key)
     where = f"HTTP {code}" if code else type(e).__name__
     return f"Gemma 4 request failed ({where}{': ' + why if why else ''}). The server log has the full details."
@@ -255,9 +285,10 @@ def _call(contents: list, mode_: str, schema: type[BaseModel], key: str | None =
 
 async def _generate(contents: list, schema: type[BaseModel], key: str | None = None, model: str | None = None) -> str:
     """Run a request at the strictest mode that works. If the API rejects a mode (explicitly, or with some other 400), try the next simpler one for this request;
-    what finally works is remembered. A temporary failure is retried once. A mode that only failed because of something unrelated (a bad key, say) is never remembered."""
+    what finally works is remembered. Temporary failures are retried with growing waits (a busy model often recovers within seconds). A mode that only failed
+    because of something unrelated (a bad key, say) is never remembered."""
     global _mode
-    i, retried, last = MODES.index(_mode), False, None
+    i, last, used, t0 = MODES.index(_mode), None, {}, time.monotonic()
     while i < len(MODES):
         mode_ = MODES[i]
         try:
@@ -275,26 +306,54 @@ async def _generate(contents: list, schema: type[BaseModel], key: str | None = N
                 i += 1
                 print(f"Trying {MODES[i]} mode for this request.")
                 continue
-            if transient(e) and not retried:
-                retried = True
-                await asyncio.sleep(1.0)
+            kind = retry_kind(e)
+            n = used.get(kind, 0) if kind else 0
+            if kind and n < len(RETRY_DELAYS[kind]) and time.monotonic() - t0 < DEADLINE_S:
+                used[kind] = n + 1
+                delay = RETRY_DELAYS[kind][n]
+                print(f"Temporary problem ({kind}); retry {n + 1} in {delay:.1f}s.")
+                await asyncio.sleep(delay)
                 continue
             break
-    raise AIError(friendly(last, model_name(model), key)) from last
+    raise AIError(friendly(last, model_name(model), key), status=_status_code(last)) from last
 
 
-async def analyse(jpeg: bytes, hint: str | None = None, key: str | None = None, model: str | None = None) -> list[dict[str, Any]] | None:
+async def _with_backup(contents: list, schema: type[BaseModel], key: str | None, model: str | None, backup: str | None) -> str:
+    """Ask the main model; if it stays overloaded after the retries, ask the backup model once. Records which one answered in `served_by`."""
+    global _mode
+    primary = model_name(model)
+    try:
+        text, used = await _generate(contents, schema, key, model), primary
+    except AIError as e:
+        b = backup_model(backup)
+        if e.status in OVERLOADED and not b:
+            raise AIError(f"{e} You can choose a backup model in Settings.", status=e.status) from e
+        if e.status not in OVERLOADED or b == primary:
+            raise
+        print(f"{primary} is overloaded; trying the backup model {b}.")
+        saved = _mode
+        try:
+            text, used = await _generate(contents, schema, key, b), b
+        except AIError:
+            raise e                                         # report the main model's problem, not the backup's
+        finally:
+            _mode = saved                                   # whatever the backup needed must not change how the main model is called
+    served_by.set(used)
+    return text
+
+
+async def analyse(jpeg: bytes, hint: str | None = None, key: str | None = None, model: str | None = None, backup: str | None = None) -> list[dict[str, Any]] | None:
     if not configured(key):
         return None
     from google.genai import types
-    text = await _generate([types.Part.from_bytes(data=jpeg, mime_type="image/jpeg"), meal_prompt(hint)], MealResult, key, model)
+    text = await _with_backup([types.Part.from_bytes(data=jpeg, mime_type="image/jpeg"), meal_prompt(hint)], MealResult, key, model, backup)
     return parse(text)
 
 
-async def estimate(name: str, key: str | None = None, model: str | None = None) -> dict[str, Any]:
+async def estimate(name: str, key: str | None = None, model: str | None = None, backup: str | None = None) -> dict[str, Any]:
     if not configured(key):
         raise AIError("No API key is set. Add one in Settings.")
-    return parse_estimate(await _generate([estimate_prompt(name)], Estimate, key, model))
+    return parse_estimate(await _with_backup([estimate_prompt(name)], Estimate, key, model, backup))
 
 
 async def check(key: str | None = None, model: str | None = None) -> dict[str, Any]:

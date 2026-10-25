@@ -108,13 +108,37 @@ def test_other_400s_do_not_downgrade_and_become_clear_messages(monkeypatch):
         asyncio.run(ai._generate(["x"], ai.MealResult, KEY, None))
 
 
-def test_transient_failures_retry_once(monkeypatch):
-    seen = run_with(monkeypatch, [ApiError(503, "overloaded"), GOOD])
-    assert asyncio.run(ai._generate(["x"], ai.MealResult, KEY, None)) == GOOD and len(seen) == 2
-    seen = run_with(monkeypatch, [ApiError(503, "x"), ApiError(503, "x")])
+def test_a_busy_model_is_retried_with_growing_waits_then_given_up_on(monkeypatch):
+    waits = []
+    real_sleep = asyncio.sleep
+    seen = run_with(monkeypatch, [ApiError(503, "high demand"), GOOD])
+    assert asyncio.run(ai._generate(["x"], ai.MealResult, KEY, None)) == GOOD and len(seen) == 2                    # recovers on the first retry
+
+    async def spy(sec):
+        waits.append(sec)
+        await real_sleep(0)
+    seen = run_with(monkeypatch, [ReasonError(503, "high demand")] * 4)
+    monkeypatch.setattr(asyncio, "sleep", spy)
+    with pytest.raises(ai.AIError, match="busy or having a problem") as e:
+        asyncio.run(ai._generate(["x"], ai.MealResult, KEY, None))
+    assert len(seen) == 4 and waits == [1.5, 4.0, 9.0] and e.value.status == 503                                   # one try plus three retries, waiting longer each time
+    assert "HTTP 503" in str(e.value) and "high demand" in str(e.value)
+
+
+def test_quota_and_network_errors_get_their_own_retry_counts_and_the_deadline_stops_retries(monkeypatch):
+    seen = run_with(monkeypatch, [ApiError(429, "quota")] * 5)
+    with pytest.raises(ai.AIError, match="out of quota"):
+        asyncio.run(ai._generate(["x"], ai.MealResult, KEY, None))
+    assert len(seen) == 2                                                                                           # a quota problem is retried once only
+    seen = run_with(monkeypatch, [ConnectionError("down")] * 5)
     with pytest.raises(ai.AIError):
         asyncio.run(ai._generate(["x"], ai.MealResult, KEY, None))
-    assert len(seen) == 2
+    assert len(seen) == 3
+    monkeypatch.setattr(ai, "DEADLINE_S", 0.0)
+    seen = run_with(monkeypatch, [ApiError(503, "x")] * 5)
+    with pytest.raises(ai.AIError):
+        asyncio.run(ai._generate(["x"], ai.MealResult, KEY, None))
+    assert len(seen) == 1                                                                                           # past the deadline there is no further waiting
 
 
 def test_key_never_reaches_logs(monkeypatch, capsys):
@@ -130,13 +154,13 @@ def test_key_never_reaches_logs(monkeypatch, capsys):
 def test_header_key_and_model_reach_the_model_and_are_never_echoed(client, monkeypatch):
     got = {}
 
-    async def fake(jpeg, hint=None, key=None, model=None):
-        got.update(key=key, model=model, hint=hint)
+    async def fake(jpeg, hint=None, key=None, model=None, backup=None):
+        got.update(key=key, model=model, hint=hint, backup=backup)
         return [{"name": "dal", "grams": 150, "confidence": "high", "preparation": "curry", "reasoning": "yellow lentils"}]
     monkeypatch.setattr(ai, "analyse", fake)
     r = client.post("/api/analyze", files={"file": ("m.png", png(), "image/png")}, data={"hint": "Indian"}, headers={"X-Gemini-Key": KEY, "X-Gemma-Model": "gemma-4-mine"})
     d = r.json()
-    assert r.status_code == 200 and got == {"key": KEY, "model": "gemma-4-mine", "hint": "indian"} and KEY not in r.text
+    assert r.status_code == 200 and got == {"key": KEY, "model": "gemma-4-mine", "hint": "indian", "backup": None} and KEY not in r.text
     assert d["foods"][0]["reasoning"] == "yellow lentils" and d["foods"][0]["preparation"] == "curry" and d["foods"][0]["matched_name"] == "dal"
     h = client.get("/api/health")
     assert h.json()["ai_configured"] is False and KEY not in h.text                        # a person's key never changes what the server reports about itself
@@ -222,7 +246,7 @@ def test_when_every_mode_fails_the_reason_is_shown_and_the_mode_is_not_changed(m
 
 
 def test_the_reason_is_cleaned_before_it_reaches_the_browser(monkeypatch):
-    run_with(monkeypatch, [ReasonError(500, f"boom {KEY} \x00\x07 " + "x" * 600)] * 2)
+    run_with(monkeypatch, [ReasonError(500, f"boom {KEY} \x00\x07 " + "x" * 600)] * 5)
     with pytest.raises(ai.AIError) as e:
         asyncio.run(ai._generate(["x"], ai.MealResult, KEY, None))
     msg = str(e.value)
@@ -243,3 +267,100 @@ def test_a_missing_package_and_other_programming_errors_are_not_retried(monkeypa
     assert len(seen) == 1                                                       # a bug is not a network blip
     seen = run_with(monkeypatch, [ConnectionError("down"), GOOD])
     assert asyncio.run(ai._generate(["x"], ai.MealResult, KEY, None)) == GOOD and len(seen) == 2          # but a dropped connection is
+
+
+# ------------------------------------------------------------------------------------------------ backup model when the main one stays overloaded
+def run_served(coro):
+    """Run a coroutine and also read `served_by` inside the same async context, the way the endpoint does."""
+    async def go():
+        ai.served_by.set(None)
+        out = await coro
+        return out, ai.served_by.get()
+    return asyncio.run(go())
+
+
+def calls_by_model(monkeypatch, plan):
+    """plan: {model: [results...]}; records (model, mode) per call."""
+    log = []
+
+    def fake_call(contents, mode_, schema, key=None, model=None):
+        m = ai.model_name(model)
+        log.append((m, mode_))
+        b = plan[m].pop(0)
+        if isinstance(b, Exception):
+            raise b
+        return b
+    monkeypatch.setattr(ai, "_call", fake_call)
+    real_sleep = asyncio.sleep
+    monkeypatch.setattr(asyncio, "sleep", lambda s: real_sleep(0))
+    return log
+
+
+def test_backup_model_answers_when_the_main_model_stays_overloaded(monkeypatch):
+    log = calls_by_model(monkeypatch, {"gemma-4-31b-it": [ApiError(503, "high demand")] * 4, "gemma-4-26b-a4b-it": [GOOD]})
+    out, who = run_served(ai._with_backup(["x"], ai.MealResult, KEY, None, None))
+    assert out == GOOD and who == "gemma-4-26b-a4b-it" and [m for m, _ in log].count("gemma-4-31b-it") == 4 and log[-1][0] == "gemma-4-26b-a4b-it"
+
+
+def test_no_backup_for_errors_that_a_different_model_would_not_fix(monkeypatch):
+    for err in (ApiError(403, "forbidden"), ApiError(429, "quota"), ApiError(404, "no model")):
+        plan = {"gemma-4-31b-it": [err, err], "gemma-4-26b-a4b-it": [GOOD]}
+        log = calls_by_model(monkeypatch, plan)
+        with pytest.raises(ai.AIError):
+            asyncio.run(ai._with_backup(["x"], ai.MealResult, KEY, None, None))
+        assert all(m == "gemma-4-31b-it" for m, _ in log), err
+
+
+def test_the_backup_can_be_changed_or_turned_off(monkeypatch):
+    log = calls_by_model(monkeypatch, {"gemma-4-31b-it": [ApiError(503, "x")] * 4, "gemma-4-mine": [GOOD]})
+    out, who = run_served(ai._with_backup(["x"], ai.MealResult, KEY, None, "gemma-4-mine"))
+    assert out == GOOD and who == "gemma-4-mine"
+    for off in ("none", "OFF", ""):
+        log = calls_by_model(monkeypatch, {"gemma-4-31b-it": [ApiError(503, "x")] * 4, "gemma-4-26b-a4b-it": [GOOD]})
+        if off == "":
+            monkeypatch.setenv("GEMMA_BACKUP_MODEL", "")
+        with pytest.raises(ai.AIError, match="choose a backup model in Settings"):
+            asyncio.run(ai._with_backup(["x"], ai.MealResult, KEY, None, off or None))
+        assert all(m == "gemma-4-31b-it" for m, _ in log)
+        monkeypatch.delenv("GEMMA_BACKUP_MODEL", raising=False)
+    assert ai.backup_model() == "gemma-4-26b-a4b-it" and ai.backup_model("x-model") == "x-model" and ai.backup_model("none") is None
+
+
+def test_a_failing_backup_reports_the_main_models_problem_and_leaves_the_mode_alone(monkeypatch):
+    log = calls_by_model(monkeypatch, {"gemma-4-31b-it": [ApiError(503, "high demand")] * 4,
+                                      "gemma-4-26b-a4b-it": [ApiError(400, "JSON mode is not enabled"), ApiError(400, "JSON mode is not enabled"), "plain text works here"]})
+    assert asyncio.run(ai._with_backup(["x"], ai.MealResult, KEY, None, None)) == "plain text works here"
+    assert ai.mode() == "schema"                                                       # the backup needed plain mode; the main model must still be asked with the schema
+    calls_by_model(monkeypatch, {"gemma-4-31b-it": [ApiError(503, "high demand")] * 4, "gemma-4-26b-a4b-it": [ApiError(404, "no such model")]})
+    with pytest.raises(ai.AIError, match="busy or having a problem") as e:
+        asyncio.run(ai._with_backup(["x"], ai.MealResult, KEY, None, None))
+    assert e.value.status == 503                                                       # the person hears about the model they chose, not about the missing backup
+
+
+def test_the_api_reports_which_model_answered(client, monkeypatch):
+    async def fake(jpeg, hint=None, key=None, model=None, backup=None):
+        ai.served_by.set("gemma-4-26b-a4b-it")
+        return [{"name": "dal", "grams": 100, "confidence": "high", "preparation": "", "reasoning": ""}]
+    monkeypatch.setattr(ai, "analyse", fake)
+    d = client.post("/api/analyze", files={"file": ("m.png", png(), "image/png")}).json()
+    assert d["model_used"] == "gemma-4-26b-a4b-it" and d["fallback_used"] is True
+    async def plain(jpeg, hint=None, key=None, model=None, backup=None):
+        ai.served_by.set("gemma-4-31b-it")
+        return [{"name": "dal", "grams": 100, "confidence": "high", "preparation": "", "reasoning": ""}]
+    monkeypatch.setattr(ai, "analyse", plain)
+    d = client.post("/api/analyze", files={"file": ("m.png", png(), "image/png")}).json()
+    assert d["model_used"] == "gemma-4-31b-it" and d["fallback_used"] is False
+    assert client.get("/api/health").json()["backup_model"] == "gemma-4-26b-a4b-it"
+
+
+def test_backup_header_is_validated_and_reaches_the_model(client, monkeypatch):
+    got = {}
+
+    async def fake(jpeg, hint=None, key=None, model=None, backup=None):
+        got["backup"] = backup
+        return [{"name": "dal", "grams": 100, "confidence": "high", "preparation": "", "reasoning": ""}]
+    monkeypatch.setattr(ai, "analyse", fake)
+    for val, ok in (("gemma-4-x-it", True), ("none", True), ("OFF", True), ("../x", False), ("a b", False)):
+        r = client.post("/api/analyze", files={"file": ("m.png", png(), "image/png")}, headers={"X-Gemma-Backup-Model": val})
+        assert (r.status_code == 200) == ok, val
+    assert got["backup"] == "OFF"
