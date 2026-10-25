@@ -35,7 +35,35 @@ async function api(path, options = {}) {
   }
   return data;
 }
-const post = (path, body) => api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+const post = (path, body, extra = {}) => api(path, { method: 'POST', headers: { 'Content-Type': 'application/json', ...extra }, body: JSON.stringify(body) });
+
+/* The person's own Gemma API key. It lives only in this browser (this session, or remembered on this device if they choose), is sent only with the requests
+   that need it, and the server passes it straight to Google without storing or logging it. */
+const AIKey = {
+  read() {
+    for (const st of [sessionStorage, localStorage]) {
+      try { const v = st.getItem('hm_ai'); if (v) { const o = JSON.parse(v); return { key: o.key || '', model: o.model || '', remember: st === localStorage }; } } catch { /* storage blocked or corrupt: treat as empty */ }
+    }
+    return { key: '', model: '', remember: false };
+  },
+  save(key, model, remember) {
+    this.clear();
+    try { (remember ? localStorage : sessionStorage).setItem('hm_ai', JSON.stringify({ key, model })); return true; } catch { return false; }
+  },
+  clear() { for (const st of [sessionStorage, localStorage]) { try { st.removeItem('hm_ai'); } catch { /* ignore */ } } },
+  headers(over) {
+    const { key, model } = over || this.read(); const hd = {};
+    if (key) hd['X-Gemini-Key'] = key;
+    if (model) hd['X-Gemma-Model'] = model;
+    return hd;
+  },
+  mask(k) { return k.length > 10 ? k.slice(0, 4) + '…' + k.slice(-4) : '••••'; },
+  valid(k) { return /^[\x21-\x7e]{16,256}$/.test(k); },
+};
+const aiReady = () => !!AIKey.read().key || !!(S.health && S.health.ai_configured);
+const insecureTransport = () => location.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+const CUISINES = ['indian', 'chinese', 'italian', 'mexican', 'middle eastern', 'japanese', 'western'];
+const getHint = () => { try { return localStorage.getItem('hm_hint') || ''; } catch { return ''; } };
 
 let toastTimer;
 function notify(msg) {
@@ -98,13 +126,13 @@ function draftTotals() {
 }
 function newFood(f) {
   return { name: f.name, grams: f.grams ?? 100, confidence: f.confidence || '', nutrition: f.nutrition || null, matched_name: f.matched_name || null, match: f.match || null,
-           custom: { kcal: '', protein_g: '', carbs_g: '', fat_g: '' } };
+           preparation: f.preparation || '', reasoning: f.reasoning || '', aiNote: '', custom: { kcal: '', protein_g: '', carbs_g: '', fat_g: '' } };
 }
 async function lookup(food) {
   try {
     const d = await post('/nutrition/lookup', { food_name: food.name });
-    Object.assign(food, { nutrition: d.nutrition, matched_name: d.matched_name, match: d.match });
-  } catch { Object.assign(food, { nutrition: null, matched_name: null, match: null }); }
+    Object.assign(food, { nutrition: d.nutrition, matched_name: d.matched_name, match: d.match, aiNote: '' });
+  } catch { Object.assign(food, { nutrition: null, matched_name: null, match: null, aiNote: '' }); }
 }
 
 async function chooseFile(file) {
@@ -124,7 +152,8 @@ async function analyse() {
   const d = S.draft; d.busy = true; d.error = ''; render();
   try {
     const form = new FormData(); form.append('file', d.file);
-    const r = await api('/analyze', { method: 'POST', body: form });
+    if (getHint()) form.append('hint', getHint());
+    const r = await api('/analyze', { method: 'POST', body: form, headers: AIKey.headers() });
     d.analysisId = r.analysis_id; d.aiEnabled = r.ai_enabled; d.message = r.message; d.foods = r.foods.map(newFood);
   } catch (e) { d.error = e.message; }
   d.busy = false; render();
@@ -181,7 +210,10 @@ function homeView() {
   const input = h('input', { type: 'file', id: 'fileInput', accept: 'image/png,image/jpeg,image/webp', class: 'hidden', 'aria-label': 'Choose a meal photo', onchange: (e) => { chooseFile(e.target.files[0]); e.target.value = ''; } });
   const drop = h('section', { class: 'upload', id: 'dropzone', 'aria-label': 'Upload a meal photo' }, h('div', { class: 'cloud', 'aria-hidden': 'true' }, '⇧'), h('h2', {}, 'Upload a photo of your meal'),
     h('p', {}, 'Drag and drop an image here, or choose a file to browse.'), h('small', {}, 'JPG, PNG, WEBP · Max 10 MB · Location data is removed from your photo'), input,
-    h('div', { class: 'actions' }, h('button', { class: 'btn', id: 'chooseBtn', type: 'button', onclick: () => input.click() }, '＋ Choose image')));
+    h('div', { class: 'actions' }, h('button', { class: 'btn', id: 'chooseBtn', type: 'button', onclick: () => input.click() }, '＋ Choose image')),
+    h('div', { class: 'field hint' }, h('label', { for: 'hint' }, 'Cuisine hint (optional, helps the AI)'),
+      h('select', { id: 'hint', onchange: (e) => { try { e.target.value ? localStorage.setItem('hm_hint', e.target.value) : localStorage.removeItem('hm_hint'); } catch { /* ignore */ } } },
+        h('option', { value: '' }, 'Let the AI decide'), CUISINES.map((c) => h('option', { value: c, selected: getHint() === c }, c[0].toUpperCase() + c.slice(1))))));
   drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('drag'); });
   drop.addEventListener('dragleave', () => drop.classList.remove('drag'));
   drop.addEventListener('drop', (e) => { e.preventDefault(); drop.classList.remove('drag'); chooseFile(e.dataTransfer.files[0]); });
@@ -213,11 +245,22 @@ function foodRow(f, i) {
       el.addEventListener('input', () => { f.custom[k] = el.value; updateTotals(); });
       return h('div', { class: 'field' }, h('span', { class: 'lab' }, label), el);
     });
-    status = h('div', { class: 'grid' }, h('div', { class: 'match warn' }, `No nutrition record for “${f.name || 'this food'}”. Rename it to a known food, or type its values per 100 g (from the package or a trusted source).`), h('div', { class: 'custom-grid' }, inputs));
+    const ask = aiReady() && h('button', { class: 'btn quiet', type: 'button', onclick: async (e) => {
+      if (!f.name.trim()) return notify('Type the food name first.');
+      e.target.disabled = true; e.target.textContent = 'Asking Gemma 4…';
+      try {
+        const r = await post('/nutrition/estimate', { food_name: f.name.trim() }, AIKey.headers());
+        for (const k of KEYS) f.custom[k] = String(r.nutrition[k]);
+        f.aiNote = r.note || 'AI estimate'; render(); notify('Estimate filled in. Please check it before saving.');
+      } catch (err) { e.target.disabled = false; e.target.textContent = 'Ask Gemma 4 to estimate'; notify(err.message); }
+    } }, 'Ask Gemma 4 to estimate');
+    status = h('div', { class: 'grid' }, h('div', { class: 'match warn' }, `No nutrition record for “${f.name || 'this food'}”. Rename it to a known food, type its values per 100 g (from the package or a trusted source)` + (ask ? ', or ask Gemma 4 for a rough estimate.' : '.')),
+      f.aiNote && h('div', { class: 'match warn' }, `Estimated by Gemma 4 (${f.aiNote}). These are rough values, so check them.`), h('div', { class: 'custom-grid' }, inputs), ask && h('div', {}, ask));
   }
   return h('div', { class: 'food' }, h('div', { class: 'food-row' }, h('div', { class: 'field' }, h('label', {}, 'Food item'), name), h('div', { class: 'field' }, h('label', {}, 'Portion (g)'), qty),
     h('button', { class: 'remove', type: 'button', 'aria-label': 'Remove ' + (f.name || 'item'), title: 'Remove', onclick: () => { S.draft.foods.splice(i, 1); render(); } }, '×')),
-    f.confidence && f.confidence !== 'manual-review' && h('div', {}, h('span', { class: 'badge' }, 'AI confidence: ' + f.confidence)), status);
+    (f.confidence && f.confidence !== 'manual-review') || f.reasoning ? h('div', { class: 'why' }, f.confidence && f.confidence !== 'manual-review' && h('span', { class: 'badge' }, 'AI confidence: ' + f.confidence),
+      f.preparation && h('span', { class: 'badge' }, f.preparation), f.reasoning && h('span', {}, f.reasoning)) : false, status);
 }
 function updateTotals() {
   const el = $('#totalLine'); if (!el || !S.draft) return;
@@ -234,7 +277,7 @@ function reviewPanel() {
   const note = h('input', { id: 'mealNote', value: d.note, maxlength: 300, placeholder: 'Note (optional)', 'aria-label': 'Note' }); note.addEventListener('input', () => { d.note = note.value; });
   const save = h('button', { class: 'btn', type: 'button', id: 'saveBtn', onclick: saveDraft }, 'Save meal');
   return h('section', { style: 'margin-bottom:28px' }, head, h('div', { class: 'panel' },
-    !d.aiEnabled && h('div', { class: 'banner' }, d.message), d.aiEnabled && d.message && h('p', { class: 'notice', style: 'margin:0 0 12px' }, d.message),
+    !d.aiEnabled && h('div', { class: 'banner' }, d.message, ' ', h('a', { href: '#/settings' }, 'Open Settings')), d.aiEnabled && d.message && h('p', { class: 'notice', style: 'margin:0 0 12px' }, d.message),
     h('div', { class: 'meal-result' }, h('img', { class: 'preview', src: d.url, alt: 'Your meal photo' }),
       h('div', {}, h('div', { class: 'eyebrow', style: 'margin-bottom:10px' }, 'Editable food list'), h('div', { class: 'food-list' }, d.foods.map(foodRow)),
         h('div', { style: 'margin-top:10px' }, h('button', { class: 'btn quiet', type: 'button', id: 'addFood', onclick: () => { d.foods.push(newFood({ name: '', grams: 100 })); render(); $$last('.food input'); } }, '＋ Add food item')),
@@ -282,6 +325,47 @@ async function loadInsights(root) {
     h('div', { class: 'panel' }, h('h2', { style: 'font-size:16px;margin-bottom:10px' }, 'Most logged foods'), h('ul', { class: 'toplist' }, s.top_foods.map((f) => h('li', {}, h('span', {}, f.name), h('span', { class: 'muted' }, `${f.times}× · ${f.grams} g`))))));
 }
 
+function aiPanel() {
+  const cur = AIKey.read(), hh = S.health || {};
+  const keyIn = h('input', { id: 'aiKey', type: 'password', autocomplete: 'off', spellcheck: 'false', placeholder: cur.key ? `Saved: ${AIKey.mask(cur.key)} (paste a new key to replace it)` : 'Paste your Gemma API key', 'aria-label': 'Gemma API key' });
+  const modelIn = h('input', { id: 'aiModel', value: cur.model, autocomplete: 'off', spellcheck: 'false', placeholder: hh.model || 'gemma-4-31b-it', 'aria-label': 'Model name' });
+  const remember = h('input', { id: 'aiRemember', type: 'checkbox', checked: cur.remember });
+  const status = h('p', { class: 'match', id: 'aiStatus', role: 'status' });
+  const state = cur.key ? `Using your key ${AIKey.mask(cur.key)} (${cur.remember ? 'remembered on this device' : 'this browser session only'}), model ${cur.model || hh.model || 'gemma-4-31b-it'}.`
+    : hh.ai_configured ? `Using the key set on the server, model ${cur.model || hh.model}.` : 'No key yet: photos get demo suggestions instead of a real analysis.';
+  const typed = () => {
+    const key = keyIn.value.trim() || cur.key, model = modelIn.value.trim();
+    if (key && !AIKey.valid(key)) { status.textContent = 'That does not look like an API key. Paste just the key, with no spaces.'; status.className = 'match warn'; return null; }
+    if (model && !/^[A-Za-z0-9][A-Za-z0-9._-]{2,63}$/.test(model)) { status.textContent = 'That does not look like a model name, for example gemma-4-31b-it.'; status.className = 'match warn'; return null; }
+    return { key, model };
+  };
+  const test = async (btn) => {
+    const v = typed(); if (!v) return;
+    if (!v.key && !hh.ai_configured) { status.textContent = 'Paste a key first.'; status.className = 'match warn'; return; }
+    btn.disabled = true; status.className = 'match'; status.textContent = 'Checking with Google…';
+    try { const r = await post('/ai/test', {}, AIKey.headers(v)); status.textContent = `Works. ${r.model} answered.`; status.className = 'match ok'; }
+    catch (e) { status.textContent = e.message; status.className = 'match warn'; }
+    btn.disabled = false;
+  };
+  return h('div', { class: 'panel stack', id: 'aiPanel' }, h('h2', { style: 'font-size:18px' }, 'AI photo recognition (Gemma 4)'),
+    h('p', { style: 'margin:0;font-size:14px' }, state),
+    insecureTransport() && h('div', { class: 'banner', role: 'alert' }, 'This page is not HTTPS, so a key you enter would travel unencrypted. Use the app on localhost or over HTTPS before entering a key.'),
+    h('div', { class: 'form-grid' }, h('div', { class: 'field' }, h('label', { for: 'aiKey' }, 'Your Gemma API key'), keyIn), h('div', { class: 'field' }, h('label', { for: 'aiModel' }, 'Model'), modelIn)),
+    h('label', { class: 'check' }, remember, ' Remember the key on this device (otherwise it is forgotten when you close the tab)'),
+    h('div', { class: 'actions', style: 'justify-content:flex-start' },
+      h('button', { class: 'btn', type: 'button', id: 'aiSave', onclick: () => {
+        const v = typed(); if (!v) return;
+        if (!v.key) { status.textContent = 'Paste a key first.'; status.className = 'match warn'; return; }
+        if (!AIKey.save(v.key, v.model, remember.checked)) { status.textContent = 'This browser would not let the key be saved.'; status.className = 'match warn'; return; }
+        notify('Key saved in this browser.'); render();
+      } }, 'Save key'),
+      h('button', { class: 'btn quiet', type: 'button', id: 'aiTest', onclick: (e) => test(e.target) }, 'Test key'),
+      cur.key && h('button', { class: 'btn danger', type: 'button', id: 'aiRemove', onclick: () => { AIKey.clear(); notify('Key removed from this browser.'); render(); } }, 'Remove key')),
+    status,
+    h('p', { class: 'notice', style: 'margin:0' }, 'Get a key at ', h('a', { href: 'https://aistudio.google.com/apikey', target: '_blank', rel: 'noopener noreferrer' }, 'aistudio.google.com/apikey'),
+      '. Your key is kept only in this browser. It is sent with each photo or estimate request to this HiperMeal server, which passes it straight to Google and does not store or log it. Photos you analyse go to Google under your own key and terms.'));
+}
+
 function settingsView() {
   const t = S.targets, f = {};
   const field = (k, label, max) => { f[k] = h('input', { id: 't_' + k, type: 'number', min: k === 'kcal' ? 500 : 0, max, step: 'any', value: t[k], inputmode: 'decimal' }); return h('div', { class: 'field' }, h('label', { for: 't_' + k }, label), f[k]); };
@@ -302,9 +386,8 @@ function settingsView() {
       try { await api('/data', { method: 'DELETE' }); await refreshData(); notify('Everything was deleted.'); render(); } catch (e) { notify(e.message); }
     } }, 'Delete all my data')));
   const about = h('div', { class: 'panel stack' }, h('h2', { style: 'font-size:18px' }, 'About this install'),
-    h('p', { style: 'margin:0;font-size:14px' }, hh.ai_configured ? `AI recognition is on (model ${hh.model}).` : 'AI recognition is off: no API key is set, so photos get demo suggestions instead of real analysis. Add GEMINI_API_KEY to enable it (see the README).'),
     h('p', { class: 'muted', style: 'margin:0;font-size:13px' }, `${hh.nutrition_records || '…'} foods in the built-in table. Values are rounded approximations, not a verified food database.`));
-  return [h('div', { class: 'page-head' }, h('div', {}, h('div', { class: 'eyebrow' }, 'Make it yours'), h('h1', { tabindex: -1 }, 'Settings'))), h('div', { class: 'stack' }, form, look, privacy, about)];
+  return [h('div', { class: 'page-head' }, h('div', {}, h('div', { class: 'eyebrow' }, 'Make it yours'), h('h1', { tabindex: -1 }, 'Settings'))), h('div', { class: 'stack' }, aiPanel(), form, look, privacy, about)];
 }
 
 // ---------------------------------------------------------------------------------------------------- router
