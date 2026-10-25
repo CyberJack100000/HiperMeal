@@ -25,15 +25,35 @@ function svg(tag, attrs, ...kids) {
   return el;
 }
 
+function detailText(data, status) {
+  const d = data && data.detail;
+  return typeof d === 'string' ? d : Array.isArray(d) ? d.map((x) => x.msg).join(' ') : 'Request failed (' + status + ')';
+}
 async function api(path, options = {}) {
   let res;
   try { res = await fetch('/api' + path, options); } catch { throw new Error('Cannot reach the HiperMeal server. Is it still running?'); }
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const d = data.detail;
-    throw new Error(typeof d === 'string' ? d : Array.isArray(d) ? d.map((x) => x.msg).join(' ') : 'Request failed (' + res.status + ')');
-  }
+  if (!res.ok) throw new Error(detailText(data, res.status));
   return data;
+}
+/** POST a form with real upload progress (fetch cannot report it). Rejects with {cancelled:true} if aborted through the signal. */
+function xhrPost(path, form, headers, { onUpload = () => {}, onSent = () => {}, signal } = {}) {
+  return new Promise((resolve, reject) => {
+    const x = new XMLHttpRequest();
+    x.open('POST', '/api' + path); x.timeout = 150000;
+    for (const [k, v] of Object.entries(headers || {})) x.setRequestHeader(k, v);
+    x.upload.onprogress = (e) => { if (e.lengthComputable) onUpload(e.loaded / e.total); };
+    x.upload.onload = () => { onUpload(1); onSent(); };
+    x.onload = () => {
+      let data = {}; try { data = JSON.parse(x.responseText); } catch { /* not JSON */ }
+      if (x.status >= 200 && x.status < 300) resolve(data); else reject(new Error(detailText(data, x.status)));
+    };
+    x.onerror = () => reject(new Error('Cannot reach the HiperMeal server. Is it still running?'));
+    x.ontimeout = () => reject(new Error('The analysis took too long. Please try again.'));
+    x.onabort = () => { const e = new Error('Cancelled.'); e.cancelled = true; reject(e); };
+    if (signal) { if (signal.aborted) return x.abort(); signal.addEventListener('abort', () => x.abort(), { once: true }); }
+    x.send(form);
+  });
 }
 const post = (path, body, extra = {}) => api(path, { method: 'POST', headers: { 'Content-Type': 'application/json', ...extra }, body: JSON.stringify(body) });
 
@@ -62,6 +82,9 @@ const AIKey = {
 };
 const aiReady = () => !!AIKey.read().key || !!(S.health && S.health.ai_configured);
 const insecureTransport = () => location.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+const IMAGE_EXTS = ['jpg', 'jpeg', 'jpe', 'png', 'webp', 'gif', 'bmp', 'tif', 'tiff', 'heic', 'heif', 'avif'];
+const isImageFile = (f) => (f.type && f.type.startsWith('image/')) || IMAGE_EXTS.includes((f.name.split('.').pop() || '').toLowerCase());   // HEIC often has no type
+const formatsText = () => ((S.health && S.health.image_formats) || ['JPG', 'PNG', 'WEBP']).join(', ');
 const CUISINES = ['indian', 'chinese', 'italian', 'mexican', 'middle eastern', 'japanese', 'western'];
 const getHint = () => { try { return localStorage.getItem('hm_hint') || ''; } catch { return ''; } };
 
@@ -137,7 +160,7 @@ async function lookup(food) {
 
 async function chooseFile(file) {
   if (!file) return;
-  if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) return notify('Please choose a JPG, PNG, or WEBP image.');
+  if (!isImageFile(file)) return notify(`That does not look like a photo. Use ${formatsText()}.`);
   if (file.size > 10 * 1024 * 1024) return notify('Image must be smaller than 10 MB.');
   clearDraft(false);
   S.draft = { file, url: URL.createObjectURL(file), analysisId: null, aiEnabled: false, message: '', mealType: '', note: '', foods: [], busy: false, error: '' };
@@ -145,18 +168,52 @@ async function chooseFile(file) {
   await analyse();
 }
 function clearDraft(redraw = true) {
-  if (S.draft && S.draft.url) URL.revokeObjectURL(S.draft.url);
+  if (S.draft && S.draft.ctl) S.draft.ctl.abort();
+  if (S.draft && S.draft.url && S.draft.url.startsWith('blob:')) URL.revokeObjectURL(S.draft.url);
   S.draft = null; if (redraw) render();
 }
+/** Bring a panel into view: on a phone the analysis and the review appear below the fold, and nothing would seem to happen. */
+function showPanel(id) {
+  const el = document.getElementById(id); if (!el) return;
+  const calm = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  el.scrollIntoView({ behavior: calm ? 'auto' : 'smooth', block: 'start' });
+}
+let progressTimer = null;
+function paintProgress() {
+  const d = S.draft, bar = $('#progBar'), track = $('#progress'), note = $('#progNote');
+  if (!d || !d.busy || !bar) return;
+  const up = d.stage === 'upload';
+  track.classList.toggle('indeterminate', !up);
+  if (up) {
+    bar.style.width = d.pct + '%'; track.setAttribute('aria-valuenow', d.pct); track.setAttribute('aria-valuetext', `Uploading photo, ${d.pct} percent`);
+    note.textContent = `Uploading photo… ${d.pct}%`;
+  } else {
+    bar.style.width = ''; track.removeAttribute('aria-valuenow'); track.setAttribute('aria-valuetext', 'Analysing your photo');
+    const sec = Math.floor((Date.now() - d.t0) / 1000);
+    note.textContent = `${aiReady() ? 'Gemma 4 is looking at your meal' : 'Preparing demo suggestions'}… ${sec}s` + (sec >= 25 ? ' · still working; big photos and busy servers take longer' : ' · usually under a minute');
+  }
+  const stages = [$('#stg0'), $('#stg1')];
+  stages[0].className = up ? 'active' : 'done'; stages[1].className = up ? '' : 'active';
+  const sr = $('#progSr'); const say = up ? 'Uploading photo' : 'Analysing photo'; if (sr && sr.textContent !== say) sr.textContent = say;      // announced on stage change only, not every tick
+}
 async function analyse() {
-  const d = S.draft; d.busy = true; d.error = ''; render();
+  const d = S.draft;
+  Object.assign(d, { busy: true, error: '', stage: 'upload', pct: 0, t0: Date.now(), ctl: new AbortController() });
+  render(); showPanel('analysis'); clearInterval(progressTimer); progressTimer = setInterval(paintProgress, 250);
   try {
     const form = new FormData(); form.append('file', d.file);
     if (getHint()) form.append('hint', getHint());
-    const r = await api('/analyze', { method: 'POST', body: form, headers: AIKey.headers() });
+    const r = await xhrPost('/analyze', form, AIKey.headers(), {
+      signal: d.ctl.signal,
+      onUpload: (f) => { d.pct = Math.round(f * 100); paintProgress(); },
+      onSent: () => { d.stage = 'analyse'; d.t0 = Date.now(); paintProgress(); },
+    });
     d.analysisId = r.analysis_id; d.aiEnabled = r.ai_enabled; d.message = r.message; d.foods = r.foods.map(newFood);
-  } catch (e) { d.error = e.message; }
-  d.busy = false; render();
+    if (d.url.startsWith('blob:')) URL.revokeObjectURL(d.url);
+    d.url = `/api/photos/${r.analysis_id}`;                   // the server's cleaned JPEG: shows even for HEIC, which browsers cannot display
+  } catch (e) { d.error = e.cancelled ? 'Analysis cancelled.' : e.message; }
+  clearInterval(progressTimer); d.busy = false; d.ctl = null;
+  if (S.draft === d) { render(); showPanel('analysis'); }
 }
 async function saveDraft() {
   const d = S.draft, { missing } = draftTotals();
@@ -207,9 +264,9 @@ function homeView() {
     h('div', { class: 'hero-visual' }, plate(), h('div', { class: 'cal-card' }, h('div', { class: 'small' }, 'Logged today'), h('h2', {}, r0(t.kcal), ' ', h('small', {}, 'kcal')),
       ...[['Protein', t.protein_g, 'c-p'], ['Carbs', t.carbs_g, 'c-c'], ['Fat', t.fat_g, 'c-f']].map(([n, v, c]) => h('div', { class: 'macro-line' }, h('span', { class: 'dot ' + c }), n, h('b', {}, r0(v) + ' g'))))));
 
-  const input = h('input', { type: 'file', id: 'fileInput', accept: 'image/png,image/jpeg,image/webp', class: 'hidden', 'aria-label': 'Choose a meal photo', onchange: (e) => { chooseFile(e.target.files[0]); e.target.value = ''; } });
+  const input = h('input', { type: 'file', id: 'fileInput', accept: 'image/*,.heic,.heif,.avif,.tif,.tiff', class: 'hidden', 'aria-label': 'Choose a meal photo', onchange: (e) => { chooseFile(e.target.files[0]); e.target.value = ''; } });
   const drop = h('section', { class: 'upload', id: 'dropzone', 'aria-label': 'Upload a meal photo' }, h('div', { class: 'cloud', 'aria-hidden': 'true' }, '⇧'), h('h2', {}, 'Upload a photo of your meal'),
-    h('p', {}, 'Drag and drop an image here, or choose a file to browse.'), h('small', {}, 'JPG, PNG, WEBP · Max 10 MB · Location data is removed from your photo'), input,
+    h('p', {}, 'Drag and drop an image here, or choose a file to browse.'), h('small', {}, `${formatsText()} · Max 10 MB · Location data is removed from your photo`), input,
     h('div', { class: 'actions' }, h('button', { class: 'btn', id: 'chooseBtn', type: 'button', onclick: () => input.click() }, '＋ Choose image')),
     h('div', { class: 'field hint' }, h('label', { for: 'hint' }, 'Cuisine hint (optional, helps the AI)'),
       h('select', { id: 'hint', onchange: (e) => { try { e.target.value ? localStorage.setItem('hm_hint', e.target.value) : localStorage.removeItem('hm_hint'); } catch { /* ignore */ } } },
@@ -267,18 +324,29 @@ function updateTotals() {
   const { t, missing } = draftTotals();
   el.textContent = missing ? `${macroLine(t)} · ${missing} item${missing > 1 ? 's' : ''} need${missing > 1 ? '' : 's'} attention` : 'Estimated ' + macroLine(t);
 }
+function previewImg(src) {
+  const img = h('img', { class: 'preview', src, alt: 'Your meal photo' });
+  img.addEventListener('error', () => img.replaceWith(h('div', { class: 'preview nopreview', role: 'img', 'aria-label': 'Preview not available' }, 'This browser cannot preview this file type. It will still be analysed.')));
+  return img;
+}
 function reviewPanel() {
   const d = S.draft;
   const head = h('div', { class: 'section-head' }, h('h2', {}, 'Review detected foods'), h('button', { class: 'text-btn', type: 'button', onclick: () => { clearDraft(); notify('Photo removed.'); } }, 'Remove photo'));
-  if (d.busy) return h('section', { style: 'margin-bottom:28px' }, head, h('div', { class: 'panel', role: 'status' }, h('div', { class: 'meal-result' }, h('img', { class: 'preview', src: d.url, alt: 'Your meal photo' }), h('div', {}, h('strong', {}, 'Analysing your photo…'), h('p', { class: 'muted' }, 'This can take up to a minute.')))));
-  if (d.error) return h('section', { style: 'margin-bottom:28px' }, head, h('div', { class: 'panel' }, h('div', { class: 'banner', role: 'alert' }, d.error), h('div', { class: 'actions', style: 'justify-content:flex-start' }, h('button', { class: 'btn', type: 'button', onclick: analyse }, 'Try again'))));
+  if (d.busy) return h('section', { id: 'analysis', style: 'margin-bottom:28px;scroll-margin-top:84px' }, h('div', { class: 'section-head' }, h('h2', {}, 'Analysing your photo')), h('div', { class: 'panel', 'aria-busy': 'true' }, h('div', { class: 'meal-result' }, previewImg(d.url),
+    h('div', { class: 'grid' },
+      h('div', { id: 'progress', class: 'progress', role: 'progressbar', 'aria-label': 'Photo analysis progress', 'aria-valuemin': 0, 'aria-valuemax': 100 }, h('div', { id: 'progBar', class: 'bar' })),
+      h('p', { id: 'progNote', class: 'muted', style: 'margin:0' }),
+      h('ol', { class: 'stages' }, h('li', { id: 'stg0' }, 'Upload photo'), h('li', { id: 'stg1' }, aiReady() ? 'Analyse with Gemma 4' : 'Prepare demo suggestions'), h('li', { id: 'stg2' }, 'Review foods and portions')),
+      h('div', { class: 'sr', id: 'progSr', role: 'status' }),
+      h('div', {}, h('button', { class: 'btn quiet', type: 'button', id: 'cancelBtn', onclick: () => d.ctl && d.ctl.abort() }, 'Cancel'))))));
+  if (d.error) return h('section', { id: 'analysis', style: 'margin-bottom:28px;scroll-margin-top:84px' }, head, h('div', { class: 'panel' }, h('div', { class: 'banner', role: 'alert' }, d.error), h('div', { class: 'actions', style: 'justify-content:flex-start' }, h('button', { class: 'btn', type: 'button', onclick: analyse }, 'Try again'))));
   const type = h('select', { id: 'mealType', 'aria-label': 'Meal type' }, h('option', { value: '' }, 'Meal type (optional)'), ['breakfast', 'lunch', 'dinner', 'snack'].map((x) => h('option', { value: x, selected: d.mealType === x }, x[0].toUpperCase() + x.slice(1))));
   type.addEventListener('change', () => { d.mealType = type.value; });
   const note = h('input', { id: 'mealNote', value: d.note, maxlength: 300, placeholder: 'Note (optional)', 'aria-label': 'Note' }); note.addEventListener('input', () => { d.note = note.value; });
   const save = h('button', { class: 'btn', type: 'button', id: 'saveBtn', onclick: saveDraft }, 'Save meal');
-  return h('section', { style: 'margin-bottom:28px' }, head, h('div', { class: 'panel' },
+  return h('section', { id: 'analysis', style: 'margin-bottom:28px;scroll-margin-top:84px' }, head, h('div', { class: 'panel' },
     !d.aiEnabled && h('div', { class: 'banner' }, d.message, ' ', h('a', { href: '#/settings' }, 'Open Settings')), d.aiEnabled && d.message && h('p', { class: 'notice', style: 'margin:0 0 12px' }, d.message),
-    h('div', { class: 'meal-result' }, h('img', { class: 'preview', src: d.url, alt: 'Your meal photo' }),
+    h('div', { class: 'meal-result' }, previewImg(d.url),
       h('div', {}, h('div', { class: 'eyebrow', style: 'margin-bottom:10px' }, 'Editable food list'), h('div', { class: 'food-list' }, d.foods.map(foodRow)),
         h('div', { style: 'margin-top:10px' }, h('button', { class: 'btn quiet', type: 'button', id: 'addFood', onclick: () => { d.foods.push(newFood({ name: '', grams: 100 })); render(); $$last('.food input'); } }, '＋ Add food item')),
         h('div', { class: 'row2' }, type, note))),
@@ -403,7 +471,7 @@ function render() {
   const keep = document.activeElement && document.activeElement.id;
   root.replaceChildren(...[].concat(view()).filter(Boolean));
   const dl = $('#foodNames'); if (!dl) root.append(h('datalist', { id: 'foodNames' }, S.foodNames.map((n) => h('option', { value: n }))));
-  updateTotals();
+  updateTotals(); paintProgress();
   if (lastRoute !== path) { const t = $('h1', root); if (t) { t.tabIndex = -1; t.focus({ preventScroll: true }); } window.scrollTo(0, 0); }
   else if (keep) { const el = document.getElementById(keep); if (el) el.focus(); }
   lastRoute = path;

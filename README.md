@@ -52,7 +52,7 @@ Without a key everything still works, but analysing a photo returns three clearl
 
 | Page | What you get |
 | --- | --- |
-| **Home** | Today's totals, photo upload (drag and drop), the review editor, recent meals |
+| **Home** | Today's totals, photo upload (drag and drop; JPG, PNG, WEBP, GIF, BMP, TIFF, AVIF, HEIC), a progress bar while it analyses, the review editor, recent meals |
 | **Review editor** | Edit every food and portion, add items, pick a meal type, add a note. Matches are shown ("Matched", "Matched as…", "Closest match, check this"). A food the table does not know asks for its values per 100 g instead of being guessed. |
 | **Meal History** | Every meal from the last 30 days, grouped by day, with its photo; delete a meal and its photo goes too |
 | **Nutrition Insights** | 7/14/30-day calorie chart against your target, averages, most-logged foods |
@@ -71,18 +71,21 @@ The original upload is the first commit in this repository, so you can diff agai
 
 **New**
 - Meal History, Nutrition Insights, Settings (targets), meal type and notes, delete from the UI.
-- 75 foods in the table (was 19), including common Indian dishes. Still approximate.
+- 288 foods in the table (was 19): Indian dishes from every course, East and Southeast Asian, Western, Middle Eastern, desserts, drinks, fruit, vegetables and staples, with about 300 alternative names ("chai", "gyoza", "brinjal"). Still approximate. Look-alikes keep their own numbers ("egg curry" is not "egg", "fried rice" is not "rice"), and a name the table does not know still asks for values.
+- A real progress bar while a photo is analysed: true percentage while uploading, then a working animation with a timer and a Cancel button (the model's time cannot be predicted, so no made-up percentage). It scrolls into view on phones.
+- More photo types: JPG, PNG, WEBP, GIF, BMP, TIFF, AVIF and HEIC (the iPhone default). The file's content decides, not the type the browser claims, and the review screen shows the cleaned copy so even HEIC previews. SVG, PDF and other non-photo files are refused.
 - Photos are re-encoded on upload: location and device metadata is removed, rotation fixed, size reduced before anything is sent to the model.
 - Privacy: unsaved photos are deleted after 24 hours, deleting a meal deletes its photo, one-click delete-all, no third-party fonts or images, a strict content security policy.
 - Robustness: rate limit on photo analysis, model timeout and one retry, tolerant parsing of the model's answer, validated ids, in-place upgrade of databases created by the first version.
 - Accessibility: keyboard and screen-reader friendly, no automated-audit violations in light or dark at desktop or phone width.
-- 73 automated tests, plus browser tests of every page.
+- 138 automated tests, plus browser tests of every page, the progress bar (under a throttled connection), every image type and the key flow.
 
 ## API
 
 | Route | Purpose |
 | --- | --- |
-| `GET /api/health` | Status, whether the server has a key, default model, structured-output mode in use |
+| `GET /api/health` | Status, whether the server has a key, default model, structured-output mode in use, supported image formats |
+| `GET /api/photos/{id}` | The cleaned JPEG of a photo just analysed (used for the preview) |
 | `POST /api/analyze` | Multipart image (`file`, optional `hint`) → suggested foods with matches, preparation and reasoning. Optional headers `X-Gemini-Key`, `X-Gemma-Model` |
 | `POST /api/nutrition/estimate` | `{food_name}` → rough per-100-g values from Gemma 4 (same optional headers) |
 | `POST /api/ai/test` | Tiny request to check a key and model (same optional headers) |
@@ -109,6 +112,7 @@ Interactive docs: http://127.0.0.1:8000/docs
 - The nutrition table is rounded and approximate. Replace it with a cited source (for example IFCT or USDA FoodData Central) before anyone relies on it.
 - Accuracy of recognition and portion size has not been measured on a set of real meals. Test with your own food before trusting it.
 - The request to Gemma 4 is covered by automated tests only through a stand-in, so run `python scripts/check_ai.py` once with your key. Which structured-output modes the hosted Gemma 4 API accepts was not verified; the step-down logic is there for that reason.
+- HEIC photos need the `pillow-heif` package (it is in `requirements.txt`). If it fails to install on some machine, everything else still works and HEIC is simply left off the supported list (shown on the upload box). Only the first picture of an animated GIF or multi-page TIFF is used.
 - Single user, local only, SQLite.
 - Targets are whatever you type; the app does not calculate personal needs.
 

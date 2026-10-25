@@ -30,7 +30,26 @@ import store  # noqa: E402
 STATIC_DIR = ROOT / "static"
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_SIDE = 1600
-ALLOWED_TYPES = {"image/jpeg", "image/png", "image/webp"}
+MAX_PIXELS = 40_000_000
+# What the file really is decides, not the type the browser claims (browsers often report HEIC photos with no type at all).
+# Pillow's format name -> the name shown to people.
+ALLOWED_FORMATS = {"JPEG": "JPG", "MPO": "JPG", "PNG": "PNG", "WEBP": "WEBP", "GIF": "GIF", "BMP": "BMP", "TIFF": "TIFF", "AVIF": "AVIF", "HEIF": "HEIC"}
+try:                                                        # iPhone photos are HEIC; this needs the pillow-heif package
+    import pillow_heif
+    pillow_heif.register_heif_opener()
+    HEIC_OK = True
+except ImportError:
+    HEIC_OK = False
+
+
+def image_formats() -> list[str]:
+    names = ["JPG", "PNG", "WEBP", "GIF", "BMP", "TIFF"]
+    from PIL import features
+    if features.check("avif"):
+        names.append("AVIF")
+    if HEIC_OK:
+        names.append("HEIC")
+    return names
 ORPHAN_HOURS = float(os.environ.get("HIPERMEAL_ORPHAN_HOURS", "24"))
 MEAL_TYPES = ("breakfast", "lunch", "dinner", "snack")
 
@@ -143,15 +162,26 @@ def _today(s: str | None) -> date:
 
 # ----------------------------------------------------------------------------------------------------------- images
 def prepare_image(contents: bytes) -> bytes:
-    """Decode, fix rotation, shrink and re-encode as JPEG. Re-encoding drops all metadata (phone photos carry GPS location), and the
-    smaller picture is faster and cheaper to send to the model."""
-    from PIL import Image, ImageOps
-    Image.MAX_IMAGE_PIXELS = 40_000_000
+    """Identify the file by its content, decode its first picture, fix rotation, shrink and re-encode as JPEG. Re-encoding drops all metadata (phone photos
+    carry GPS location), and the smaller picture is faster and cheaper to send to the model. Animated GIFs, multi-page TIFFs and similar use their first frame."""
+    from PIL import Image, ImageOps, UnidentifiedImageError
+    Image.MAX_IMAGE_PIXELS = MAX_PIXELS * 2                 # Pillow itself refuses anything beyond twice this
+    supported = ", ".join(image_formats())
     try:
-        with Image.open(BytesIO(contents)) as im:
+        src = Image.open(BytesIO(contents))
+    except Image.DecompressionBombError as exc:
+        raise HTTPException(400, "This picture has too many pixels to process. Use a smaller or lower-resolution photo.") from exc
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        raise HTTPException(415, f"That file is not a supported image. Use {supported}.") from exc
+    if src.format not in ALLOWED_FORMATS:
+        raise HTTPException(415, f"{(src.format or 'That').title()} files are not supported. Use {supported}.")
+    if src.width * src.height > MAX_PIXELS:
+        raise HTTPException(400, "This picture has too many pixels to process. Use a smaller or lower-resolution photo.")
+    try:
+        with src as im:
             im.load()
             im = ImageOps.exif_transpose(im)
-            if im.mode in ("RGBA", "LA", "P"):
+            if im.mode in ("RGBA", "LA", "PA", "P"):
                 im = im.convert("RGBA")
                 bg = Image.new("RGB", im.size, (255, 255, 255))
                 bg.paste(im, mask=im.split()[-1])
@@ -162,14 +192,16 @@ def prepare_image(contents: bytes) -> bytes:
             out = BytesIO()
             im.save(out, "JPEG", quality=85, optimize=True)
             return out.getvalue()
+    except Image.DecompressionBombError as exc:
+        raise HTTPException(400, "This picture has too many pixels to process. Use a smaller or lower-resolution photo.") from exc
     except Exception as exc:
-        raise HTTPException(400, "Could not decode this image. Try another JPG, PNG, or WEBP file.") from exc
+        raise HTTPException(400, "Could not read this image. It may be damaged; try another file.") from exc
 
 
 # ----------------------------------------------------------------------------------------------------------- routes
 @app.get("/api/health")
 def health() -> dict[str, Any]:
-    return {"status": "ok", "service": "HiperMeal API", "version": app.version, "ai_configured": ai.server_key_set(), "model": ai.model_name(), "ai_mode": ai.mode(),
+    return {"status": "ok", "service": "HiperMeal API", "version": app.version, "ai_configured": ai.server_key_set(), "model": ai.model_name(), "ai_mode": ai.mode(), "image_formats": image_formats(),
             "nutrition_records": len(nutrition.NUTRITION)}
 
 
@@ -179,8 +211,6 @@ async def analyze_image(request: Request, file: UploadFile = File(...), hint: st
     hint = (hint or "").strip().lower() or None
     if hint is not None and hint not in ai.CUISINES:
         raise HTTPException(422, "Unknown cuisine hint.")
-    if file.content_type not in ALLOWED_TYPES:
-        raise HTTPException(415, "Unsupported image type. Upload JPG, PNG, or WEBP.")
     contents = await file.read(MAX_IMAGE_BYTES + 1)
     if not contents:
         raise HTTPException(400, "The uploaded image is empty.")
@@ -291,6 +321,15 @@ def list_meals(days: int | None = Query(None, ge=1, le=366), today: str | None =
     with store.db() as c:
         rows = c.execute(sql, (*args, limit)).fetchall()
     return {"meals": [store.meal_row(r) for r in rows]}
+
+
+@app.get("/api/photos/{analysis_id}")
+def analysed_photo(analysis_id: UUID_PATH):
+    """The cleaned JPEG of a photo that was just analysed, so the review screen can show it even when the browser cannot display the original (HEIC, TIFF...)."""
+    p = store.upload_path(analysis_id)
+    if not p.is_file():
+        raise HTTPException(404, "Photo not found.")
+    return FileResponse(p, media_type="image/jpeg")
 
 
 @app.get("/api/meals/{meal_id}/image")

@@ -26,7 +26,7 @@ def test_matches_that_are_the_same_food(name, expect, how):
     assert m and m.name == expect and m.how == how
 
 
-@pytest.mark.parametrize("name", ["fried egg", "lamb vindaloo", "rice pudding", "chicken tikka masala", "", "123", "banana split sundae"])
+@pytest.mark.parametrize("name", ["duck confit", "lamb vindaloo", "bread pudding", "chicken tikka masala", "", "123", "banana split sundae", "unicorn stew"])
 def test_foods_that_are_not_clearly_known_are_not_guessed(name):
     assert nutrition.find(name) is None            # a wrong match would silently attach the wrong calories
 
@@ -79,9 +79,79 @@ def test_ai_answer_parsing_is_tolerant_and_strict():
             ai.parse(bad)
 
 
-@pytest.mark.parametrize("data,ctype,status", [(b"", "image/png", 400), (b"hello", "image/png", 400), (png(), "text/plain", 415), (png(), "image/gif", 415)])
-def test_bad_uploads_are_refused(client, data, ctype, status):
-    assert upload(client, data, ctype=ctype).status_code == status
+def test_empty_and_non_image_uploads_are_refused(client):
+    assert upload(client, b"", ctype="image/png").status_code == 400
+    for name, data in (("note.txt", b"hello"), ("pic.svg", b'<svg xmlns="http://www.w3.org/2000/svg"><circle r="5"/></svg>'), ("doc.pdf", b"%PDF-1.4\n1 0 obj<<>>endobj"),
+                       ("x.png", b"\x89PNG\r\n\x1a\nnot really a png")):
+        r = upload(client, data, name, "image/png")                              # claiming to be an image does not make it one
+        assert r.status_code in (400, 415), name
+        assert r.status_code == 415 and "JPG" in r.json()["detail"] or name == "x.png"
+    assert "HEIC" in upload(client, b"hello").json()["detail"]
+
+
+def test_the_file_content_decides_not_the_type_the_browser_claims(client):
+    for ctype in ("text/plain", "image/gif", "application/octet-stream", ""):
+        assert upload(client, png(), "meal.bin", ctype).status_code == 200, ctype
+
+
+def test_formats_that_decode_but_are_not_on_the_list_are_refused(client):
+    import io as _io
+    from PIL import Image
+    b = _io.BytesIO()
+    Image.new("RGB", (32, 32), (1, 2, 3)).save(b, "ICO")
+    r = upload(client, b.getvalue(), "icon.ico", "image/x-icon")
+    assert r.status_code == 415 and "not supported" in r.json()["detail"]
+
+
+def test_a_damaged_image_is_a_clear_400(client):
+    good = png((200, 200), (1, 2, 3))
+    r = upload(client, good[: len(good) // 2] + b"\x00" * 50)
+    assert r.status_code in (400, 415)
+
+
+def test_a_picture_with_too_many_pixels_is_refused(client):
+    assert upload(client, png((9000, 5000), (10, 20, 30))).status_code == 400            # about 45 million pixels, tiny file
+
+
+def _bytes(fmt, size=(96, 72), color=(200, 100, 50), mode="RGB", **kw):
+    import io as _io
+    from PIL import Image
+    b = _io.BytesIO()
+    Image.new(mode, size, color).save(b, fmt, **kw)
+    return b.getvalue()
+
+
+@pytest.mark.parametrize("fmt,name,ctype", [("GIF", "a.gif", "image/gif"), ("BMP", "a.bmp", "image/bmp"), ("TIFF", "a.tif", "image/tiff"), ("AVIF", "a.avif", "image/avif"),
+                                           ("HEIF", "a.heic", "image/heic"), ("HEIF", "iphone.heic", ""), ("JPEG", "a.jpg", "image/jpeg"), ("WEBP", "a.webp", "image/webp")])
+def test_every_listed_format_is_accepted_and_becomes_a_clean_jpeg(client, fmt, name, ctype):
+    r = upload(client, _bytes(fmt), name, ctype)
+    assert r.status_code == 200, (fmt, r.text)
+    saved = store.upload_path(r.json()["analysis_id"]).read_bytes()
+    im = Image.open(io.BytesIO(saved))
+    assert im.format == "JPEG" and im.size == (96, 72) and not im.getexif()
+
+
+def test_cmyk_and_transparent_and_animated_files(client):
+    assert upload(client, _bytes("TIFF", mode="CMYK", color=(0, 0, 0, 0)), "a.tif", "image/tiff").status_code == 200
+    r = upload(client, _bytes("PNG", (40, 40), (0, 0, 0, 0), "RGBA"), "t.png", "image/png")
+    assert Image.open(store.upload_path(r.json()["analysis_id"])).convert("RGB").getpixel((5, 5)) == (255, 255, 255)           # transparency becomes white
+    frames = [Image.new("RGB", (50, 50), c) for c in ((255, 0, 0), (0, 0, 255))]
+    b = io.BytesIO()
+    frames[0].save(b, "GIF", save_all=True, append_images=frames[1:], duration=100, loop=0)
+    r = upload(client, b.getvalue(), "anim.gif", "image/gif")
+    assert r.status_code == 200
+    px = Image.open(store.upload_path(r.json()["analysis_id"])).getpixel((25, 25))
+    assert px[0] > 200 and px[2] < 60                                           # the first frame (red), not the last
+
+
+def test_health_lists_the_supported_formats_and_the_clean_photo_is_served(client):
+    fm = client.get("/api/health").json()["image_formats"]
+    assert {"JPG", "PNG", "WEBP", "GIF", "BMP", "TIFF", "AVIF", "HEIC"} <= set(fm)
+    a = upload(client, _bytes("HEIF"), "p.heic", "").json()["analysis_id"]
+    r = client.get(f"/api/photos/{a}")
+    assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg" and Image.open(io.BytesIO(r.content)).format == "JPEG"      # viewable even though browsers cannot show HEIC
+    assert client.get("/api/photos/00000000-0000-0000-0000-000000000000").status_code == 404
+    assert client.get("/api/photos/not-a-uuid").status_code == 422
 
 
 def test_too_large_upload(client, monkeypatch):
@@ -223,3 +293,33 @@ def test_meals_are_listed_by_their_own_day_newest_first(client):
     got = client.get("/api/meals").json()["meals"]
     assert [m["local_date"] for m in got] == ["2026-03-10", "2026-03-10", "2026-03-09", "2026-03-08"]
     assert got[0]["foods"][0]["name"] == "dal"                  # within a day, the most recently saved first
+
+
+# ------------------------------------------------------------------------------------------------------ the larger food table
+@pytest.mark.parametrize("name,expect", [
+    ("Veg Momos", "veg momos"), ("momos", "veg momos"), ("masala dosa", "dosa"), ("pav bhaji", "pav bhaji"), ("Chicken Biryani", "chicken biryani"), ("chai", "masala chai"),
+    ("fried egg", "fried egg"), ("sunny side up", "fried egg"), ("french fries", "french fries"), ("potato chips", "potato chips"), ("crisps", "potato chips"),
+    ("sushi roll", "sushi"), ("gyoza", "dumplings"), ("shawarma wrap", "shawarma"), ("a bowl of ramen", "ramen"), ("kheer", "kheer"), ("payasam", "kheer"),
+    ("brinjal curry", "baingan bharta"), ("eggplant", "brinjal"), ("lauki", "bottle gourd"), ("cashew nuts", "cashews"), ("coffee", "black coffee"), ("latte", "coffee with milk"),
+    ("grilled salmon", "salmon"), ("Chole Masala", "chana masala"), ("mattar paneer", "aloo matar"), ("green tea", "tea"), ("avocados", "avocado"), ("dal tadka", "dal"),
+])
+def test_new_foods_and_aliases_resolve(name, expect):
+    m = nutrition.find(name)
+    assert m is not None and m.name == expect, (name, m)
+
+
+@pytest.mark.parametrize("name", ["egg curry", "chicken curry", "paneer tikka", "fried rice", "veg biryani", "egg fried rice", "scrambled eggs", "butter chicken", "garlic naan", "pizza slice",
+                                  "tomato soup", "chicken soup", "chicken momos", "grilled fish", "fish curry", "fish fry", "mutton curry", "dark chocolate", "chocolate"])
+def test_look_alike_foods_keep_their_own_numbers(name):
+    m = nutrition.find(name)
+    assert m is not None and m.name == name and m.how == "exact"            # "egg curry" must never become plain "egg", "fried rice" never "cooked rice"
+
+
+def test_the_table_is_large_and_clean():
+    assert len(nutrition.NUTRITION) >= 250
+    assert not (set(nutrition.ALIASES) & set(nutrition.NUTRITION)), "an alias that is also a food would never be used"
+    assert all(t in nutrition.NUTRITION for t in nutrition.ALIASES.values())
+    assert all(k == nutrition.normalise(k) for k in nutrition.NUTRITION), "keys must already be in normalised form or they can never match"
+    assert all(k == nutrition.normalise(k) for k in nutrition.ALIASES)
+    for must in ("momos", "paneer butter masala", "ramen", "croissant", "hummus", "kimchi", "pineapple", "lassi", "poha", "idli", "rajma"):
+        assert nutrition.find(must) is not None, must
