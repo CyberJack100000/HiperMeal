@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>HiperMeal — Visual Nutrition Diary</title>
+<style>
+:root{--blue:#1769ff;--blue2:#eaf2ff;--ink:#102044;--muted:#7182a3;--line:#e7edf7;--bg:#f7faff;--white:#fff;--green:#16b889;--orange:#ffb547;--pink:#f45c91;--shadow:0 10px 30px rgba(35,78,140,.06)}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}button,input{font:inherit}button{cursor:pointer;border:0}.app{min-height:100vh;display:grid;grid-template-columns:238px 1fr}.sidebar{background:#fff;border-right:1px solid var(--line);padding:25px 16px;display:flex;flex-direction:column;gap:30px}.brand{font-size:23px;font-weight:850;letter-spacing:-1px;display:flex;align-items:center;gap:10px;padding:0 12px}.brandmark{width:34px;height:34px;border-radius:11px;background:var(--blue);color:white;display:grid;place-items:center;font-size:20px}.brand span span{color:var(--blue)}.nav{display:grid;gap:7px}.nav button{background:transparent;color:#536786;text-align:left;padding:13px 14px;border-radius:12px;display:flex;gap:12px;align-items:center;font-weight:650}.nav button.active,.nav button:hover{background:var(--blue2);color:var(--blue)}.nav .ico{font-size:18px;width:22px;text-align:center}.side-note{margin-top:auto;border-radius:18px;padding:18px;background:linear-gradient(145deg,#edf5ff,#e2eeff);color:#17488f}.side-note .leaf{font-size:25px;color:var(--blue)}.side-note strong{display:block;font-size:15px;margin:10px 0 6px}.side-note p{font-size:13px;line-height:1.55;margin:0;color:#52709f}.main{min-width:0}.topbar{height:68px;background:rgba(255,255,255,.82);border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:flex-end;gap:12px;padding:0 34px}.icon-btn{width:38px;height:38px;border-radius:50%;background:#f1f6ff;color:#3d68a8}.avatar{width:36px;height:36px;border-radius:50%;background:linear-gradient(145deg,#78b5ff,#1769ff);color:white;display:grid;place-items:center;font-weight:800}.content{max-width:1600px;margin:auto;padding:28px 34px 40px}.hero{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(330px,.9fr);gap:26px;align-items:center;margin-bottom:26px}.eyebrow{font-size:12px;letter-spacing:1.4px;color:#6483b4;font-weight:800;text-transform:uppercase}.hero h1{font-size:clamp(30px,3.1vw,44px);line-height:1.13;letter-spacing:-1.7px;margin:12px 0 14px;max-width:680px}.hero h1 span{color:var(--blue)}.hero p{color:var(--muted);line-height:1.7;max-width:620px;margin:0;font-size:15px}.hero-visual{display:flex;align-items:center;justify-content:center;gap:15px;min-width:0}.meal-img{width:min(45%,210px);aspect-ratio:1;object-fit:cover;border-radius:50%;box-shadow:0 15px 35px #d7e5fa;border:7px solid white}.cal-card{background:white;border:1px solid #edf1f8;box-shadow:var(--shadow);border-radius:18px;padding:18px;min-width:180px;flex:1;max-width:230px}.cal-card .small{font-size:12px;color:var(--muted)}.cal-card h2{font-size:28px;margin:7px 0 14px;letter-spacing:-.7px}.cal-card h2 small{font-size:14px}.macro-line{display:flex;align-items:center;gap:9px;margin:10px 0;font-size:13px}.macro-line b{margin-left:auto}.dot{width:9px;height:9px;border-radius:50%;display:inline-block;flex-shrink:0}.upload{background:linear-gradient(120deg,#f3f8ff,#edf5ff);border:1.5px dashed #a9cbff;border-radius:18px;padding:25px;display:flex;flex-direction:column;align-items:center;text-align:center;gap:9px;transition:.2s;margin-bottom:28px}.upload.drag{background:#e4efff;border-color:var(--blue);transform:scale(1.003)}.upload .cloud{font-size:34px;color:var(--blue)}.upload h3{margin:0;font-size:18px}.upload p{margin:0;color:#7182a3;font-size:14px}.upload small{color:#8194b5}.primary{background:var(--blue);color:#fff;border-radius:12px;padding:11px 20px;font-weight:750;box-shadow:0 7px 15px #1769ff2b}.primary:hover{background:#0756e8}.secondary{background:#edf4ff;color:var(--blue);border-radius:10px;padding:10px 14px;font-weight:700}.upload-actions{display:flex;gap:9px;flex-wrap:wrap;justify-content:center;margin-top:5px}.hidden{display:none!important}.section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 13px}.section-head h2{font-size:18px;letter-spacing:-.4px;margin:0}.text-btn{background:none;color:var(--blue);font-size:13px;font-weight:750}.steps{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:13px;margin-bottom:28px}.step{background:white;border:1px solid var(--line);box-shadow:var(--shadow);border-radius:16px;padding:16px;min-height:124px;position:relative}.step-top{display:flex;align-items:center;gap:10px;margin-bottom:12px}.num{width:31px;height:31px;border-radius:50%;display:grid;place-items:center;background:#e4efff;color:var(--blue);font-weight:800}.step-icon{font-size:20px;color:var(--blue)}.step strong{font-size:14px;display:block;margin-bottom:5px}.step p{font-size:12px;color:var(--muted);line-height:1.5;margin:0}.bottom-grid{display:grid;grid-template-columns:1.4fr 1fr;gap:24px}.panel{background:white;border:1px solid var(--line);border-radius:18px;box-shadow:var(--shadow);padding:19px;min-width:0}.empty{min-height:160px;display:flex;align-items:center;justify-content:center;text-align:center;flex-direction:column;gap:8px;color:var(--muted)}.empty .bowl{font-size:35px;color:#9db1d0}.empty strong{color:var(--ink);font-size:14px}.empty p{font-size:13px;margin:0}.summary-body{display:flex;gap:20px;align-items:center}.ring{width:126px;height:126px;border-radius:50%;background:conic-gradient(var(--blue) 0 35%,var(--orange) 35% 78%,var(--pink) 78% 100%);display:grid;place-items:center;flex-shrink:0}.ring-inner{background:white;border-radius:50%;width:103px;height:103px;display:flex;align-items:center;justify-content:center;flex-direction:column}.ring-inner strong{font-size:24px}.ring-inner span{font-size:12px;color:var(--muted)}.bars{flex:1;min-width:0}.bar-row{margin:12px 0}.bar-label{display:flex;gap:8px;align-items:center;font-size:12px}.bar-label b{margin-left:auto}.track{height:7px;border-radius:9px;background:#edf1f7;margin-top:7px;overflow:hidden}.fill{height:100%;border-radius:9px}.meal-result{display:grid;grid-template-columns:150px 1fr;gap:18px;align-items:start}.preview{width:100%;aspect-ratio:1;object-fit:cover;border-radius:14px;background:#f2f6fd}.food-list{display:grid;gap:9px}.food-row{display:grid;grid-template-columns:minmax(0,1fr) 90px 30px;gap:8px;align-items:center}.food-row input{width:100%;min-width:0;padding:9px 10px;border:1px solid var(--line);border-radius:9px;color:var(--ink);background:#fff}.food-row label{font-size:11px;color:var(--muted);display:block;margin-bottom:4px}.remove{background:#fff0f4;color:#d53f70;border-radius:8px;height:36px}.result-footer{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-top:17px;padding-top:15px;border-top:1px solid var(--line)}.notice{font-size:11px;color:#8292ac;line-height:1.5;margin-top:12px}.toast{position:fixed;bottom:22px;right:22px;background:#102044;color:white;padding:13px 18px;border-radius:12px;box-shadow:var(--shadow);z-index:10;font-size:14px}.mobile-brand{display:none}
+@media(max-width:1050px){.app{grid-template-columns:205px 1fr}.content{padding:24px}.hero{grid-template-columns:1fr}.hero-visual{justify-content:flex-start}.meal-img{width:150px}.steps{grid-template-columns:repeat(2,minmax(0,1fr))}.bottom-grid{grid-template-columns:1fr}.hero h1{max-width:750px}}
+@media(max-width:650px){.app{display:block}.sidebar{display:none}.topbar{height:58px;padding:0 16px}.mobile-brand{display:flex;margin-right:auto;font-size:19px;font-weight:850;align-items:center;gap:8px}.mobile-brand span{color:var(--blue)}.content{padding:20px 15px 30px}.hero{gap:20px}.hero h1{font-size:32px}.hero-visual{gap:10px}.meal-img{width:36%;border-width:4px}.cal-card{padding:13px;min-width:0}.cal-card h2{font-size:23px}.steps{grid-template-columns:1fr 1fr;gap:9px}.step{padding:13px}.bottom-grid{gap:17px}.summary-body{gap:13px}.ring{width:105px;height:105px}.ring-inner{width:85px;height:85px}.ring-inner strong{font-size:20px}.panel{padding:14px}.meal-result{grid-template-columns:95px 1fr;gap:12px}.food-row{grid-template-columns:minmax(0,1fr) 72px 27px}.upload{padding:23px 14px}.section-head h2{font-size:17px}}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand"><div class="brandmark">✦</div><span>Hiper<span>Meal</span></span></div>
+    <nav class="nav" aria-label="Main navigation">
+      <button class="active" data-view="home"><span class="ico">⌂</span>Home</button>
+      <button data-view="history"><span class="ico">▦</span>Meal History</button>
+      <button data-view="insights"><span class="ico">▥</span>Nutrition Insights</button>
+      <button data-view="settings"><span class="ico">⚙</span>Settings</button>
+    </nav>
+    <div class="side-note"><div class="leaf">✳</div><strong>Eat smarter,<br>live healthier.</strong><p>Turn your meals into meaningful insights.</p></div>
+  </aside>
+  <main class="main">
+    <header class="topbar">
+      <div class="mobile-brand"><div class="brandmark">✦</div>Hiper<span>Meal</span></div>
+      <button class="icon-btn" id="themeBtn" aria-label="Toggle color mode">☼</button>
+      <div class="avatar" title="Profile">H</div>
+    </header>
+    <div class="content">
+      <section class="hero">
+        <div>
+          <div class="eyebrow">Your visual nutrition diary</div>
+          <h1>Understand your meals<br>with the <span>power of AI</span></h1>
+          <p>Upload a photo of your meal, identify the food items, and get nutrition estimates. Review, edit, and save to track your daily intake.</p>
+        </div>
+        <div class="hero-visual">
+          <img class="meal-img" src="https://images.unsplash.com/photo-1546833999-b9f581a1996d?auto=format&fit=crop&w=500&q=85" alt="Indian meal with rice, dal and vegetables">
+          <div class="cal-card"><div class="small">Illustrative meal estimate</div><h2>520 <small>kcal</small></h2>
+            <div class="macro-line"><span class="dot" style="background:var(--blue)"></span>Protein <b>18 g</b></div>
+            <div class="macro-line"><span class="dot" style="background:var(--orange)"></span>Carbs <b>72 g</b></div>
+            <div class="macro-line"><span class="dot" style="background:var(--pink)"></span>Fat <b>16 g</b></div>
+          </div>
+        </div>
+      </section>
+      <section class="upload" id="dropzone">
+        <div class="cloud">⇧</div><h3>Upload a photo of your meal</h3>
+        <p>Drag and drop an image here, or choose a file to browse.</p><small>JPG, PNG, WEBP · Max 10 MB</small>
+        <input type="file" id="fileInput" accept="image/png,image/jpeg,image/webp" class="hidden">
+        <div class="upload-actions"><button class="primary" id="chooseBtn">＋ Choose image</button><button class="secondary hidden" id="analyzeBtn">Analyze photo</button></div>
+        <div id="uploadStatus" class="notice" aria-live="polite"></div>
+      </section>
+      <section id="resultSection" class="hidden" style="margin-bottom:28px">
+        <div class="section-head"><h2>Review detected foods</h2><button class="text-btn" id="clearBtn">Remove photo</button></div>
+        <div class="panel">
+          <div class="meal-result">
+            <img id="preview" class="preview" alt="Uploaded meal preview">
+            <div>
+              <div class="eyebrow" style="margin-bottom:10px">Editable food list</div>
+              <div id="foodList" class="food-list"></div>
+              <div style="margin-top:10px"><button class="secondary" id="addFoodBtn">＋ Add food item</button></div>
+            </div>
+          </div>
+          <div class="result-footer"><div><strong id="totalCalories">Nutrition estimate pending</strong><div class="notice" style="margin:4px 0 0">Uses illustrative sample data until nutrition lookup is connected.</div></div><button class="primary" id="saveBtn">Save meal</button></div>
+          <div class="notice">Food recognition and nutrition lookup are not connected in this frontend prototype. Review all items and portions before relying on estimates.</div>
+        </div>
+      </section>
+      <section>
+        <div class="section-head"><h2>How it works</h2><button class="text-btn" id="howBtn">See how it works ↗</button></div>
+        <div class="steps">
+          <div class="step"><div class="step-top"><div class="num">1</div><div class="step-icon">▧</div></div><strong>Upload meal photo</strong><p>Choose a clear photo of your meal.</p></div>
+          <div class="step"><div class="step-top"><div class="num" style="background:#eee8ff;color:#7448f5">2</div><div class="step-icon">⌕</div></div><strong>AI identifies foods</strong><p>Suggested food items appear for review.</p></div>
+          <div class="step"><div class="step-top"><div class="num" style="background:#dcf8ee;color:#0ca879">3</div><div class="step-icon">✎</div></div><strong>Review & edit</strong><p>Adjust names, portions, and ingredients.</p></div>
+          <div class="step"><div class="step-top"><div class="num" style="background:#fff0d9;color:#d88a12">4</div><div class="step-icon">▥</div></div><strong>Get nutrition info</strong><p>View estimated calories and macros.</p></div>
+        </div>
+      </section>
+      <section class="bottom-grid">
+        <div><div class="section-head"><h2>Recent meals</h2><button class="text-btn" id="viewAllBtn">View all →</button></div>
+          <div class="panel" id="recentPanel"><div class="empty"><div class="bowl">♧</div><strong>No meals logged yet</strong><p>Upload your first meal photo to get started.</p><button class="secondary" id="uploadMealBtn">＋ Upload a meal</button></div></div>
+        </div>
+        <div><div class="section-head"><h2>Today's summary</h2></div>
+          <div class="panel"><div class="summary-body"><div class="ring"><div class="ring-inner"><strong id="summaryKcal">0</strong><span>kcal logged</span></div></div>
+            <div class="bars">
+              <div class="bar-row"><div class="bar-label"><span class="dot" style="background:var(--blue)"></span>Protein <b id="proteinValue">0 g</b></div><div class="track"><div class="fill" id="proteinBar" style="width:0;background:var(--blue)"></div></div></div>
+              <div class="bar-row"><div class="bar-label"><span class="dot" style="background:var(--orange)"></span>Carbs <b id="carbValue">0 g</b></div><div class="track"><div class="fill" id="carbBar" style="width:0;background:var(--orange)"></div></div></div>
+              <div class="bar-row"><div class="bar-label"><span class="dot" style="background:var(--pink)"></span>Fat <b id="fatValue">0 g</b></div><div class="track"><div class="fill" id="fatBar" style="width:0;background:var(--pink)"></div></div></div>
+            </div></div><p class="notice">Daily totals update when you save meals. Targets are illustrative, not personalized dietary advice.</p></div>
+        </div>
+      </section>
+    </div>
+  </main>
+</div>
+<div id="toast" class="toast hidden" role="status"></div>
+<script>
+const $=id=>document.getElementById(id);
+let imageUrl=null, uploadedFile=null, foods=[], meals=[], analysisId=null;
+const API = (path) => `/api${path}`;
+async function api(path, options={}) {
+  const response = await fetch(API(path), options);
+  const data = await response.json().catch(()=>({detail:"Server returned an unreadable response"}));
+  if(!response.ok) throw new Error(data.detail || "Request failed");
+  return data;
+}
+function notify(msg){$('toast').textContent=msg;$('toast').classList.remove('hidden');setTimeout(()=>$('toast').classList.add('hidden'),3200)}
+function safeNum(v){const n=Number(v);return Number.isFinite(n)&&n>0?n:0}
+function totals(){return foods.reduce((t,f)=>{const factor=safeNum(f.grams)/100;const n=f.nutrition||{kcal:0,protein_g:0,carbs_g:0,fat_g:0};t.kcal+=n.kcal*factor;t.p+=n.protein_g*factor;t.c+=n.carbs_g*factor;t.f+=n.fat_g*factor;return t},{kcal:0,p:0,c:0,f:0})}
+function renderFoods(){
+  $('foodList').innerHTML='';
+  foods.forEach((food,i)=>{
+    const row=document.createElement('div');row.className='food-row';
+    const nameWrap=document.createElement('div');const label=document.createElement('label');label.textContent='Food item';
+    const name=document.createElement('input');name.value=food.name;name.setAttribute('aria-label','Food item name');
+    name.addEventListener('change',async e=>{foods[i].name=e.target.value.trim();try{const d=await api('/nutrition/lookup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({food_name:foods[i].name})});foods[i].nutrition=d.food;foods[i].matched_name=d.matched_name;updateTotals()}catch(err){notify(err.message)}});
+    nameWrap.append(label,name);
+    const qtyWrap=document.createElement('div');const ql=document.createElement('label');ql.textContent='Portion (g)';const qty=document.createElement('input');qty.type='number';qty.min='1';qty.value=food.grams;qty.setAttribute('aria-label','Portion in grams');qty.addEventListener('input',e=>{foods[i].grams=e.target.value;updateTotals()});qtyWrap.append(ql,qty);
+    const remove=document.createElement('button');remove.className='remove';remove.textContent='×';remove.title='Remove food item';remove.setAttribute('aria-label','Remove '+food.name);remove.onclick=()=>{foods.splice(i,1);renderFoods()};row.append(nameWrap,qtyWrap,remove);$('foodList').append(row);
+  });updateTotals();
+}
+function updateTotals(){const t=totals();$('totalCalories').textContent=`Estimated ${Math.round(t.kcal)} kcal · P ${Math.round(t.p)} g · C ${Math.round(t.c)} g · F ${Math.round(t.f)} g`}
+async function loadImage(file){
+  if(!file)return;
+  if(!['image/jpeg','image/png','image/webp'].includes(file.type)){notify('Please choose a JPG, PNG, or WEBP image.');return}
+  if(file.size>10*1024*1024){notify('Image must be smaller than 10 MB.');return}
+  if(imageUrl)URL.revokeObjectURL(imageUrl);imageUrl=URL.createObjectURL(file);uploadedFile=file;analysisId=null;
+  $('preview').src=imageUrl;$('resultSection').classList.remove('hidden');$('analyzeBtn').classList.remove('hidden');
+  $('uploadStatus').textContent=`Selected: ${file.name}. Choose “Analyze photo” to send it to the backend.`;
+  $('analyzeBtn').textContent='Analyze photo';$('foodList').innerHTML='';foods=[];
+}
+$('chooseBtn').onclick=()=>$('fileInput').click();
+$('uploadMealBtn').onclick=()=>$('fileInput').click();
+$('fileInput').addEventListener('change',e=>loadImage(e.target.files[0]));
+const dz=$('dropzone');dz.addEventListener('dragover',e=>{e.preventDefault();dz.classList.add('drag')});dz.addEventListener('dragleave',()=>dz.classList.remove('drag'));dz.addEventListener('drop',e=>{e.preventDefault();dz.classList.remove('drag');loadImage(e.dataTransfer.files[0])});
+$('analyzeBtn').onclick=async()=>{
+ if(!uploadedFile){notify('Choose an image first.');return}
+ $('analyzeBtn').disabled=true;$('analyzeBtn').textContent='Analyzing…';$('uploadStatus').textContent='Uploading image to HiperMeal backend…';
+ try{
+   const form=new FormData();form.append('file',uploadedFile);
+   const data=await api('/analyze',{method:'POST',body:form});
+   analysisId=data.analysis_id;
+   foods=(data.foods||[]).map(f=>({name:f.name,grams:f.grams||100,nutrition:f.nutrition||null,confidence:f.confidence,notes:f.notes||''}));
+   if(!foods.length) foods=[{name:'roti',grams:60,nutrition:{kcal:297,protein_g:8.2,carbs_g:55,fat_g:7.5}},{name:'dal',grams:150,nutrition:{kcal:116,protein_g:7.6,carbs_g:20.1,fat_g:.4}},{name:'cooked rice',grams:120,nutrition:{kcal:130,protein_g:2.7,carbs_g:28.2,fat_g:.3}}];
+   renderFoods();
+   $('uploadStatus').textContent=data.message||'Analysis complete. Review food names and portion sizes before saving.';
+   notify(data.ai_enabled?'AI suggestions ready. Please verify them.':'Backend is connected. AI vision is not configured, so editable demo suggestions were loaded.');
+ }catch(err){$('uploadStatus').textContent='Analysis failed: '+err.message;notify(err.message)}
+ finally{$('analyzeBtn').disabled=false;$('analyzeBtn').textContent='Analyze photo'}
+};
+$('addFoodBtn').onclick=async()=>{foods.push({name:'cooked rice',grams:100,nutrition:{kcal:130,protein_g:2.7,carbs_g:28.2,fat_g:.3}});renderFoods()};
+$('clearBtn').onclick=()=>{if(imageUrl)URL.revokeObjectURL(imageUrl);imageUrl=null;uploadedFile=null;analysisId=null;$('fileInput').value='';$('resultSection').classList.add('hidden');$('uploadStatus').textContent='';$('analyzeBtn').classList.add('hidden');notify('Photo removed.')};
+$('saveBtn').onclick=async()=>{
+ if(!uploadedFile){notify('Upload a photo first.');return}
+ if(!foods.length){notify('Add at least one food item.');return}
+ if(foods.some(f=>!f.name.trim()||safeNum(f.grams)<=0)){notify('Enter a food name and positive portion for every item.');return}
+ const t=totals();
+ try{
+   const saved=await api('/meals',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({analysis_id:analysisId,foods:foods.map(f=>({name:f.name,grams:Number(f.grams)})),totals:{kcal:t.kcal,protein_g:t.p,carbs_g:t.c,fat_g:t.f}})});
+   meals.unshift({...saved,image:imageUrl,foods:foods.map(f=>({...f})),kcal:t.kcal,p:t.p,c:t.c,f:t.f,date:new Date(saved.created_at||Date.now())});
+   renderMeals();updateSummary();notify('Meal saved to backend.');
+ }catch(err){notify('Could not save meal: '+err.message)}
+};
+function renderMeals(){
+ const panel=$('recentPanel');panel.innerHTML='';
+ if(!meals.length){panel.innerHTML='<div class="empty"><div class="bowl">♧</div><strong>No meals logged yet</strong><p>Upload your first meal photo to get started.</p><button class="secondary" id="uploadMealBtn2">＋ Upload a meal</button></div>';$('uploadMealBtn2').onclick=()=>$('fileInput').click();return}
+ meals.slice(0,4).forEach(m=>{const row=document.createElement('div');row.style.cssText='display:flex;gap:13px;align-items:center;padding:9px 0;border-bottom:1px solid var(--line)';
+ const im=document.createElement('img');im.src=m.image||'';im.style.cssText='width:56px;height:56px;object-fit:cover;border-radius:12px';
+ const info=document.createElement('div');info.style.flex='1';const strong=document.createElement('strong');strong.textContent=m.foods.map(f=>f.name).join(', ');strong.style.cssText='font-size:13px;display:block;overflow-wrap:anywhere';const small=document.createElement('small');small.textContent=(m.date instanceof Date?m.date:new Date(m.date)).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})+' · '+Math.round(m.kcal)+' kcal';small.style.color='var(--muted)';info.append(strong,small);row.append(im,info);panel.append(row)})
+}
+function updateSummary(){const t=meals.reduce((a,m)=>({kcal:a.kcal+m.kcal,p:a.p+m.p,c:a.c+m.c,f:a.f+m.f}),{kcal:0,p:0,c:0,f:0});$('summaryKcal').textContent=Math.round(t.kcal);$('proteinValue').textContent=Math.round(t.p)+' g';$('carbValue').textContent=Math.round(t.c)+' g';$('fatValue').textContent=Math.round(t.f)+' g';$('proteinBar').style.width=Math.min(100,t.p/100*100)+'%';$('carbBar').style.width=Math.min(100,t.c/250*100)+'%';$('fatBar').style.width=Math.min(100,t.f/70*100)+'%'}
+async function loadSavedMeals(){
+ try{
+  const data=await api('/meals');
+  meals=data.meals.map(m=>({...m,kcal:m.totals.kcal,p:m.totals.protein_g,c:m.totals.carbs_g,f:m.totals.fat_g,foods:m.foods,date:new Date(m.created_at),image:''}));
+  renderMeals();updateSummary();
+ }catch(e){console.warn('Could not load saved meals',e)}
+}
+$('howBtn').onclick=()=>notify('Upload a photo, review foods and portions, then inspect estimated nutrition.');
+$('viewAllBtn').onclick=()=>notify(meals.length?`${meals.length} meal(s) saved.`:'No meals have been saved yet.');
+document.querySelectorAll('.nav button').forEach(b=>b.onclick=()=>{document.querySelectorAll('.nav button').forEach(x=>x.classList.remove('active'));b.classList.add('active');if(b.dataset.view!=='home')notify(b.textContent.trim()+' page is planned for a later iteration.')});
+$('themeBtn').onclick=()=>{document.body.classList.toggle('night');const n=document.body.classList.contains('night');document.documentElement.style.setProperty('--bg',n?'#101a2c':'#f7faff');document.documentElement.style.setProperty('--ink',n?'#edf4ff':'#102044');document.querySelectorAll('.panel,.step,.cal-card,.sidebar,.topbar').forEach(el=>{el.style.background=n?'#19263c':'';el.style.borderColor=n?'#2b3a54':''});notify(n?'Night preview enabled.':'Light mode enabled.')};
+loadSavedMeals();
+
+</script>
+</body>
+</html>
