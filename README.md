@@ -132,3 +132,10 @@ tests/           pytest suite
 docs/            project presentation (.pptx) and walkthrough video from the first prototype
 ```
 The deck and video in `docs/` describe the original prototype; the workflow they show is unchanged, the pages listed above are new.
+
+
+Developed by :-
+Souparna Saha
+Aryan Kushwaha
+Gourav Das
+Priyanshu Singhal
