@@ -135,7 +135,7 @@ The deck and video in `docs/` describe the original prototype; the workflow they
 
 
 Developed by :-
-Souparna Saha
-Aryan Kushwaha
-Gourav Das
+Souparna Saha,
+Aryan Kushwaha,
+Gourav Das and
 Priyanshu Singhal
